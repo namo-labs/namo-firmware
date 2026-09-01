@@ -110,6 +110,8 @@ ESP32 전원: USB 별도 급전 (파일럿 단계)
 pump_ms = dose_ml / ml_per_second * 1000
 ```
 
+구현은 `no_std`에서 부동소수 라이브러리 의존을 피하려고 이 계산을 µL/s 정수 산술로 합니다. `cfg.toml`에는 사람이 읽는 `ml_per_second`(예: 6.5)를 두고, 펌웨어가 `ul_per_second`(6500)로 변환해 `namo-core`에 넘깁니다.
+
 `ml_per_second`는 카탈로그 값이 아니라 **실제 설치 높이에서 실측한 값**입니다. 수중 펌프의 유량은 양정(펌프 수면부터 토출구까지의 높이)에 크게 좌우돼 카탈로그의 240L/h는 무양정 기준입니다. 실측은 `bring-up-guide.md` Stage 4에서 합니다.
 
 실측값은 `cfg.toml`에 상수로 넣고, 물통 위치나 튜브 배치를 바꾸면 다시 측정합니다.
@@ -295,7 +297,7 @@ requested ──▶ [안전 판정] ──▶ rejected (사유 포함)
 }
 ```
 
-`reason`은 종료 상태가 `completed`가 아닐 때 항상 채웁니다. 값은 `reservoir_empty` · `leak_detected` · `cooldown` · `daily_limit` · `already_running` · `clock_unsynced` · `leak_stale` · `dose_too_large` · `locked` · `hardware_error` 중 하나입니다.
+`reason`은 종료 상태가 `completed`가 아닐 때 항상 채웁니다. 값은 `reservoir_empty` · `reservoir_unknown` · `leak_detected` · `leak_stale` · `cooldown` · `daily_limit` · `already_running` · `clock_unsynced` · `dose_too_large` · `locked` · `hardware_error` 중 하나입니다.
 
 `ttl_expired`는 목록에 없습니다. TTL이 만료된 명령은 **결과를 발행하지 않고 조용히 버리기** 때문입니다(§4.6). 뒤늦게 도착한 명령에 결과를 돌려주면, 그 결과를 보고 재시도하는 흐름이 생겨 이중 급수 위험이 됩니다.
 
