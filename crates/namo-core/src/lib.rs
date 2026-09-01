@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod mibeacon;
+pub mod telemetry;
 
 #[cfg(test)]
 mod tests {
