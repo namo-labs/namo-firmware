@@ -30,6 +30,33 @@
 
 ### 절차
 
+0. **rustup이 있는지 먼저 확인합니다.**
+
+```bash
+which rustup
+```
+
+`rustup not found`가 나오면 여기서 멈추고 아래를 먼저 해결합니다. `espup`은 rustup 위에서만 동작하므로, Homebrew로 설치한 rust만 있으면 Xtensa 툴체인을 깔 수 없습니다.
+
+```bash
+# 현재 rust가 어디서 왔는지 확인
+which -a cargo rustc
+brew list --versions rust
+```
+
+`/opt/homebrew/bin/cargo`가 나오면 Homebrew rust입니다. 다음 순서로 교체합니다.
+
+```bash
+brew uninstall rust          # rustup과 PATH가 충돌하므로 먼저 제거
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+which -a cargo               # /Users/<이름>/.cargo/bin/cargo 가 먼저 나와야 합니다
+```
+
+Homebrew rust를 남겨두면 `/opt/homebrew/bin`이 PATH 앞에 있어 rustup 툴체인이 무시됩니다. 빌드가 되는데 타겟만 없다는 혼란스러운 상태가 됩니다.
+
+`namo-core`는 Homebrew rust로도 테스트가 돌아가지만, 펌웨어 빌드부터는 rustup이 반드시 필요합니다.
+
 1. Xtensa 툴체인을 설치합니다.
 
 ```bash
@@ -66,11 +93,14 @@ cargo generate esp-rs/esp-idf-template cargo
 
 ### 합격 기준
 
+- `which rustup`이 경로를 돌려줍니다.
+- `which -a cargo`의 첫 줄이 `~/.cargo/bin/cargo`입니다.
 - `espflash board-info`가 ESP32-S3를 인식합니다.
 - 시험 프로젝트가 빌드되고 플래싱되며, `espflash monitor`에 로그가 올라옵니다.
 
 ### 막히면
 
+- `espup install`이 rustup을 못 찾는다고 하면 위 0번으로 돌아갑니다.
 - 포트를 못 찾으면 `ls /dev/cu.*`로 확인합니다. `usbmodem` 또는 `usbserial`로 시작하는 이름입니다.
 - 두 개가 보이면 하나는 USB-JTAG, 하나는 UART 브리지입니다. 둘 다 시도해봅니다.
 - 인식이 안 되면 BOOT 버튼을 누른 채로 USB를 꽂고 놓습니다.
