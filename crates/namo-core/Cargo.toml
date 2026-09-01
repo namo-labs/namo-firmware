@@ -1,0 +1,7 @@
+[package]
+name = "namo-core"
+version.workspace = true
+edition.workspace = true
+description = "나모 파일럿의 하드웨어 비의존 판정 로직"
+
+[dependencies]
