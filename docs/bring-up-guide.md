@@ -81,13 +81,33 @@ espflash board-info
 
 출력에서 `Chip type`, `Crystal frequency`, `Features`를 기록합니다. `Features`에 옥탈 PSRAM이 표시되면 `hardware-pilot-status.md`의 H2를 "옥탈"로 갱신하고, **GPIO33~37을 절대 쓰지 않습니다.**
 
-4. 템플릿으로 시험 프로젝트를 만들고 blink를 올려봅니다. (이 프로젝트는 검증용이며 나중에 버립니다.)
+4. 템플릿으로 시험 프로젝트를 만들고 빌드해봅니다. (이 프로젝트는 검증용이며 나중에 버립니다.)
 
 ```bash
 cd /tmp
 cargo generate esp-rs/esp-idf-template cargo
 # MCU는 esp32s3 선택
 ```
+
+5. **생성된 `.cargo/config.toml`의 `[env]`에 ESP-IDF 버전을 반드시 고정합니다.**
+
+```toml
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.4.4"
+```
+
+이걸 빠뜨리면 `esp-idf-sys`가 기본값인 **v5.2.3**을 받는데, 그 버전은 다음 오류로 빌드가 실패합니다.
+
+```
+CMake Error ... Failed to run Python dependency check. Error: 255
+```
+
+메시지는 "Python을 실행하지 못했다"고 말하지만 실제 원인은 다릅니다. 최신 pip가 패키지 배포명을 PEP 625 방식으로 정규화해 `ruamel.yaml`을 `ruamel-yaml`로 설치하는데, v5.2.3의 의존성 검사에는 이 이름 차이를 흡수하는 폴백이 없습니다. 패키지는 멀쩡히 설치돼 있는데도 "없다"고 판정하고, 그 실패가 종료코드 255로 나와 cmake가 엉뚱한 메시지를 출력합니다.
+
+v5.4의 `get_version()`에는 정규화 폴백이 들어가 이 문제가 해결됐습니다. 재설치·다운그레이드로는 고쳐지지 않으니 **버전 고정이 유일한 해결책입니다.**
+
+`.embuild` 디렉토리는 프로젝트마다 새로 생기므로, 새 크레이트를 만들 때마다 이 설정이 필요합니다.
 
 첫 빌드는 ESP-IDF를 내려받느라 5~10분 걸립니다. 정상입니다.
 
@@ -493,5 +513,6 @@ T13이 통과하지 않으면 게이트 풀다운을 다시 확인합니다.
 | BLE 값이 일부만 옴 | 정상. 수 분 기다림 |
 | BLE 값이 아예 안 옴 | HHCC 배터리 → Flower Care 앱 연결 상태(앱이 점유 중이면 광고가 끊길 수 있음) |
 | WiFi 연결 실패 | 2.4GHz SSID인지 확인 |
+| `Failed to run Python dependency check` | Python 문제가 아님. `ESP_IDF_VERSION = "v5.4.4"` 고정 (Stage 0 참고) |
 | Zigbee 어댑터를 못 엶 | `adapter: ember` 확인, 포트 경로 확인, 다른 프로세스가 점유 중인지 확인 |
 | 급수가 계속 거부됨 | `water/result`의 `reason` 확인. `leak_stale`이면 Zigbee2MQTT가 죽은 것 |
