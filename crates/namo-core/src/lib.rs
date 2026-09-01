@@ -4,6 +4,7 @@
 pub mod command;
 pub mod dose;
 pub mod mibeacon;
+pub mod safety;
 pub mod telemetry;
 
 #[cfg(test)]
