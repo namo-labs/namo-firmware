@@ -1,0 +1,30 @@
+# Zigbee2MQTT 설정. ~/zigbee2mqtt/data/configuration.yaml로 복사해 씁니다.
+#
+# macOS에서는 컨테이너로 USB 패스스루가 되지 않아 네이티브로 실행합니다.
+# Mosquitto만 Docker로 띄우고 여기서 그 브로커에 접속합니다.
+
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://localhost:1883
+
+serial:
+  # SONOFF ZBDongle-E. 포트 이름은 꽂는 위치에 따라 달라지므로
+  # `ls /dev/cu.usbserial-*`로 확인해 맞춥니다.
+  port: /dev/cu.usbserial-3130
+  # ZBDongle-E는 EmberZNet 칩입니다. TI 칩을 쓰는 ZBDongle-P와 달라
+  # adapter를 ember로 지정해야 합니다. 이걸 틀리면 동글을 못 엽니다.
+  adapter: ember
+  baudrate: 115200
+
+frontend:
+  enabled: true
+  port: 8080
+
+advanced:
+  log_level: info
+  # 채널 25는 WiFi 대역과 겹침이 가장 적은 축입니다. 파일럿에서 WiFi와
+  # Zigbee를 같은 방에서 쓰므로 간섭을 줄입니다.
+  channel: 25
+
+homeassistant:
+  enabled: false

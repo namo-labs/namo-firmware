@@ -426,37 +426,77 @@ Docker Desktop for Mac은 USB 장치를 컨테이너에 넘기지 못합니다. 
 따라서 **Zigbee2MQTT는 Docker 없이 맥에 직접 설치해 실행합니다.**
 
 ```bash
-brew install node
+# Zigbee2MQTT 2.x는 pnpm을 쓰고, Node 지원 범위가 ^22.2.0 || ^24 || <=26.2입니다.
+# 더 최신 Node가 깔려 있으면 Node 24를 따로 설치해 그것으로만 실행합니다.
+brew install node@24
 git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git
-cd zigbee2mqtt && npm ci
+cd zigbee2mqtt
+
+export PATH="/opt/homebrew/opt/node@24/bin:$PATH"
+corepack enable pnpm
+corepack prepare pnpm@10.18.3 --activate
+pnpm install --frozen-lockfile
+pnpm build
 ```
+
+`npm ci`는 실패합니다. 이 저장소에는 `package-lock.json`이 없고 `pnpm-lock.yaml`만 있습니다.
 
 ### 설정
 
 `data/configuration.yaml`에서 어댑터를 지정합니다. ZBDongle-E는 **EmberZNet** 기반입니다.
 
-```yaml
-serial:
-  adapter: ember
-  port: /dev/cu.usbmodem____   # ls /dev/cu.* 로 확인
-mqtt:
-  server: mqtt://localhost:1883
+레포의 `gateway/zigbee2mqtt-configuration.yaml`을 `~/zigbee2mqtt/data/configuration.yaml`로 복사해 씁니다. 포트 이름만 실물에 맞게 고칩니다.
+
+```bash
+cp gateway/zigbee2mqtt-configuration.yaml ~/zigbee2mqtt/data/configuration.yaml
+ls /dev/cu.usbserial-*        # 동글 포트 확인 후 파일에 반영
 ```
 
-ZBDongle-P(TI 기반)와 설정이 다릅니다. 잘못 쓰면 어댑터를 못 엽니다.
+ZBDongle-E는 **EmberZNet** 기반이라 `adapter: ember`입니다. ZBDongle-P(TI 기반)와 설정이 다릅니다. 잘못 쓰면 어댑터를 못 엽니다.
+
+실행:
+
+```bash
+export PATH="/opt/homebrew/opt/node@24/bin:$PATH"
+cd ~/zigbee2mqtt && node index.js
+```
 
 ### 페어링
 
-1. Zigbee2MQTT 웹 UI(`http://localhost:8080`)에서 "Permit join"을 켭니다.
-2. Aqara 센서의 버튼을 5초 이상 길게 눌러 페어링 모드로 넣습니다.
-3. 두 개를 각각 페어링하고 이름을 `leak_tank`, `leak_pot`으로 바꿉니다.
+웹 UI(`http://localhost:8080`)로 해도 되고 MQTT로 해도 됩니다.
+
+```bash
+# 페어링 창 열기. time의 최대값은 254이며, 넘기면 창이 열리지 않습니다.
+docker exec mosquitto mosquitto_pub -h localhost \
+  -t 'zigbee2mqtt/bridge/request/permit_join' -m '{"time": 254}'
+
+# 페어링 후 이름 바꾸기
+docker exec mosquitto mosquitto_pub -h localhost \
+  -t 'zigbee2mqtt/bridge/request/device/rename' \
+  -m '{"from": "0x00158d00________", "to": "leak_tank"}'
+
+# 끝나면 반드시 닫기
+docker exec mosquitto mosquitto_pub -h localhost \
+  -t 'zigbee2mqtt/bridge/request/permit_join' -m '{"time": 0}'
+```
+
+센서 쪽 조작:
+
+1. 버튼을 5초 이상 **계속** 눌러 파란 LED가 **3번 연속** 깜빡이는 것을 봅니다. 한 번만 깜빡이는 것은 그냥 신호 전송이며 페어링 모드가 아닙니다.
+2. 손을 떼고 20~30초 기다립니다.
+3. 인터뷰 도중 멈춘 것 같으면 버튼을 짧게 눌러 깨웁니다. 배터리 기기라 절전에 들어가면 인터뷰가 진행되지 않습니다.
+4. 두 개를 각각 페어링하고 이름을 `leak_tank`, `leak_pot`으로 바꿉니다.
+
+페어링 중 로그에 `Device left`가 보이는 것은 정상입니다. 기존 연결을 끊고 새로 붙는 절차입니다.
 
 ### 합격 기준
 
 - 센서 두 개가 웹 UI에 보입니다.
-- 젖은 휴지를 두 금속 단자에 대면 `zigbee2mqtt/leak_tank`에 `{"water_leak":true}`가 발행됩니다.
+- 젖은 휴지를 두 금속 단자에 대면 `zigbee2mqtt/leak_tank`에 `{"water_leak":true}`가 발행되고, 닦으면 `false`로 돌아옵니다.
 - ESP32 텔레메트리의 `leak`이 `detected`로 바뀝니다.
 - Zigbee2MQTT를 끄면 5분 뒤 `leak`이 `unknown`이 되고 **급수가 거부됩니다** (fail-closed).
+
+> **부분 통과 기록 (2026-09-07)** — 센서 두 개 페어링과 물 감지 왕복(`true` → `false`)까지 확인했습니다. 코디네이터는 EmberZNet 7.4.4, 채널 25, 모델은 둘 다 `SJCGQ11LM`입니다. ESP32 연동 항목 두 개는 안테나가 도착해 Stage 6을 통과한 뒤에 확인합니다.
 
 ---
 
