@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod command;
+pub mod daily;
 pub mod dose;
 pub mod float;
 pub mod mibeacon;

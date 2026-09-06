@@ -37,6 +37,36 @@ pub enum AbortReason {
     ReservoirEmpty,
 }
 
+impl RejectReason {
+    /// MQTT 결과 페이로드의 `reason` 값. 스펙 `docs/pilot-design.md` §5.4.
+    ///
+    /// 게이트웨이가 문자열로 분기하므로 값이 바뀌면 계약이 깨집니다.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            RejectReason::ClockUnsynced => "clock_unsynced",
+            RejectReason::Locked => "locked",
+            RejectReason::AlreadyRunning => "already_running",
+            RejectReason::DoseTooLarge => "dose_too_large",
+            RejectReason::LeakDetected => "leak_detected",
+            RejectReason::LeakStale => "leak_stale",
+            RejectReason::ReservoirEmpty => "reservoir_empty",
+            RejectReason::ReservoirUnknown => "reservoir_unknown",
+            RejectReason::Cooldown => "cooldown",
+            RejectReason::DailyLimit => "daily_limit",
+        }
+    }
+}
+
+impl AbortReason {
+    /// MQTT 결과 페이로드의 `reason` 값. 거부 사유와 같은 이름 공간을 씁니다.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            AbortReason::LeakDetected => "leak_detected",
+            AbortReason::ReservoirEmpty => "reservoir_empty",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Limits {
     pub max_dose_ml: u32,
@@ -155,6 +185,58 @@ pub fn abort_reason(reservoir: Reservoir, leak: Leak) -> Option<AbortReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 설계 문서 §5.4가 나열한 값과 정확히 일치해야 합니다. 게이트웨이가
+    /// 이 문자열로 분기하므로 오타가 나면 조용히 어긋납니다.
+    #[test]
+    fn 거부사유_문자열이_계약과_일치한다() {
+        let pairs = [
+            (RejectReason::ClockUnsynced, "clock_unsynced"),
+            (RejectReason::Locked, "locked"),
+            (RejectReason::AlreadyRunning, "already_running"),
+            (RejectReason::DoseTooLarge, "dose_too_large"),
+            (RejectReason::LeakDetected, "leak_detected"),
+            (RejectReason::LeakStale, "leak_stale"),
+            (RejectReason::ReservoirEmpty, "reservoir_empty"),
+            (RejectReason::ReservoirUnknown, "reservoir_unknown"),
+            (RejectReason::Cooldown, "cooldown"),
+            (RejectReason::DailyLimit, "daily_limit"),
+        ];
+        for (reason, expected) in pairs {
+            assert_eq!(reason.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn 중단사유는_거부사유와_같은_이름을_쓴다() {
+        assert_eq!(
+            AbortReason::LeakDetected.as_str(),
+            RejectReason::LeakDetected.as_str()
+        );
+        assert_eq!(
+            AbortReason::ReservoirEmpty.as_str(),
+            RejectReason::ReservoirEmpty.as_str()
+        );
+    }
+
+    /// ttl_expired는 계약에 없습니다. 만료된 명령은 결과를 발행하지 않고
+    /// 조용히 버리기 때문입니다(§4.6).
+    #[test]
+    fn ttl_expired는_사유에_없다() {
+        let all = [
+            RejectReason::ClockUnsynced,
+            RejectReason::Locked,
+            RejectReason::AlreadyRunning,
+            RejectReason::DoseTooLarge,
+            RejectReason::LeakDetected,
+            RejectReason::LeakStale,
+            RejectReason::ReservoirEmpty,
+            RejectReason::ReservoirUnknown,
+            RejectReason::Cooldown,
+            RejectReason::DailyLimit,
+        ];
+        assert!(all.iter().all(|r| r.as_str() != "ttl_expired"));
+    }
 
     /// 모든 조건이 정상인 기준 입력.
     fn 정상() -> SafetyInput {

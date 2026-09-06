@@ -946,11 +946,14 @@ version = "0.1.0"
 name = "namo-firmware"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "embuild",
  "esp-idf-svc",
  "esp32-nimble",
  "log",
  "namo-core",
+ "serde",
+ "serde_json",
  "toml-cfg",
 ]
 
