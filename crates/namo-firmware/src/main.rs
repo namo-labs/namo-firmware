@@ -115,6 +115,10 @@ fn main() -> anyhow::Result<()> {
         move || ble::scan::run(shared)
     })?;
 
+    // 브로커가 없어도 브라우저로 상태를 볼 수 있게 합니다. 읽기 전용이라
+    // 여기로는 급수를 시킬 수 없습니다.
+    let _http = net::http::start(shared.clone())?;
+
     log::info!("모든 태스크가 기동됐습니다");
 
     // main 스레드가 끝나면 _wifi와 sntp가 떨어져 네트워크가 내려갑니다.
