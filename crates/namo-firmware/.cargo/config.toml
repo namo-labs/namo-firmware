@@ -1,0 +1,18 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+# v5.2.3은 배포명 정규화(ruamel.yaml → ruamel-yaml)를 못 다뤄 의존성 검사가 깨집니다.
+ESP_IDF_VERSION = "v5.4.4"
+# 프로젝트 안(.embuild)이 아니라 ~/.espressif에 받습니다. 크레이트마다 다시
+# 받지 않고, /tmp 정리 같은 외부 요인에도 사라지지 않습니다.
+ESP_IDF_TOOLS_INSTALL_DIR = "global"

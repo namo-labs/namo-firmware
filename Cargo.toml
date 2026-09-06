@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/namo-core"]
+# 펌웨어는 xtensa 타겟이라 워크스페이스에 넣으면 루트의 `cargo test`가
+# 호스트 타겟으로 빌드하려다 실패합니다. 별도 크레이트로 둡니다.
+exclude = ["crates/namo-firmware"]
 
 [workspace.package]
 version = "0.1.0"
