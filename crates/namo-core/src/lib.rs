@@ -3,6 +3,7 @@
 
 pub mod command;
 pub mod dose;
+pub mod float;
 pub mod mibeacon;
 pub mod safety;
 pub mod telemetry;

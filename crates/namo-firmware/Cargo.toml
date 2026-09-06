@@ -10,9 +10,14 @@ description = "나모 파일럿 ESP32-S3 펌웨어"
 name = "pinscan"
 path = "src/bin/pinscan.rs"
 
+[[bin]]
+name = "floattest"
+path = "src/bin/floattest.rs"
+
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.52.1"
+namo-core = { path = "../namo-core" }
 
 [build-dependencies]
 embuild = "0.33"

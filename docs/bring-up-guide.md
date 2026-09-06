@@ -183,6 +183,20 @@ L형 수평 플로트 스위치는 **물통 측면**에 다는 부품입니다. 
 - 물을 채웠을 때 `ok`, 비웠을 때 `empty`로 나옵니다. **반대로 나오면 여기서 고칩니다.** 이걸 반대로 둔 채 다음으로 가면 빈 물통에서 펌프가 돕니다.
 - 물통을 흔들어도 값이 초당 여러 번 튀지 않습니다 (디바운스 확인).
 
+`ok`가 한 번이라도 떠야 배선이 실제로 연결됐다는 뜻입니다. 선이 빠져 있어도 `empty`로 읽히므로(fail-safe), `empty`만 보고는 판단할 수 없습니다.
+
+> **통과 기록 (2026-09-06)** — 물통 장착(1-C) 전에 손으로 플로트를 세 번 왕복시켜 확인했습니다. 방향이 설계와 일치하고, 전환이 왕복당 한 번씩만 찍혀 디바운스도 정상입니다.
+
+### 쓰는 도구
+
+```bash
+cd crates/namo-firmware
+cargo build --release
+espflash flash --monitor --non-interactive target/xtensa-esp32s3-espidf/release/floattest
+```
+
+`floattest`는 `namo-core`의 디바운서를 그대로 씁니다. 여기서 본 동작이 본 펌웨어의 동작과 같아야 의미가 있습니다.
+
 ---
 
 ## Stage 2 — MOSFET 무부하 검증 (펌프 연결 전)
