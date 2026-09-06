@@ -14,10 +14,15 @@ path = "src/bin/pinscan.rs"
 name = "floattest"
 path = "src/bin/floattest.rs"
 
+[[bin]]
+name = "blescan"
+path = "src/bin/blescan.rs"
+
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.52.1"
 namo-core = { path = "../namo-core" }
+esp32-nimble = "0.12"
 
 [build-dependencies]
 embuild = "0.33"

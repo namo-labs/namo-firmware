@@ -298,6 +298,7 @@ requested ──▶ [안전 판정] ──▶ rejected (사유 포함)
 ```
 
 - 아직 한 번도 수집하지 못한 센서값은 `null`입니다. 임의의 기본값으로 채우지 않습니다.
+- HHCC는 약 10초마다 값을 **하나씩** 광고하므로 네 값이 다 채워지기까지 약 40초가 걸립니다(실측). 텔레메트리를 10초마다 발행하면 같은 값이 여러 번 실리는 것이 정상이며, 수신 측은 `sensor_seen_ago_s`로 신선도를 판단합니다. 센서를 오래됐다고 볼 임계값은 40초보다 충분히 커야 합니다.
 - `reservoir`는 `ok` / `empty` / `unknown`, `leak`은 `none` / `detected` / `unknown`입니다.
 - `pump`는 `idle` / `running` / `locked`입니다.
 
