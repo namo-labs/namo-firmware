@@ -1,0 +1,248 @@
+//! MQTT 구독과 발행. 스펙 `docs/pilot-design.md` §5.
+
+use esp_idf_svc::mqtt::client::{
+    EspMqttClient, EspMqttConnection, EventPayload, LwtConfiguration, MqttClientConfiguration, QoS,
+};
+use esp_idf_svc::sys::EspError;
+use namo_core::command::{CommandId, WaterCommand};
+use serde::Deserialize;
+use std::sync::{Arc, Mutex};
+
+use crate::clock;
+use crate::config::{TOPIC_LEAK_POT, TOPIC_LEAK_TANK};
+use crate::state::Shared;
+
+/// 브로커에 보낼 수 있는 클라이언트. 여러 태스크가 나눠 씁니다.
+#[derive(Clone)]
+pub struct Publisher {
+    client: Arc<Mutex<EspMqttClient<'static>>>,
+}
+
+impl Publisher {
+    /// 발행합니다. 실패해도 패닉하지 않고 로그만 남깁니다.
+    ///
+    /// 급수 결과를 못 보내는 것보다 펌프가 안 꺼지는 것이 훨씬 나쁩니다.
+    /// 네트워크 실패가 제어 흐름을 끊지 않게 합니다.
+    pub fn publish(&self, topic: &str, payload: &[u8], retain: bool) {
+        let Ok(mut client) = self.client.lock() else {
+            log::error!("MQTT 클라이언트 락이 깨졌습니다");
+            return;
+        };
+        if let Err(e) = client.enqueue(topic, QoS::AtLeastOnce, retain, payload) {
+            log::error!("발행 실패 ({topic}): {e}");
+        }
+    }
+
+    fn subscribe(&self, topic: &str) {
+        let Ok(mut client) = self.client.lock() else {
+            return;
+        };
+        match client.subscribe(topic, QoS::AtLeastOnce) {
+            Ok(_) => log::info!("구독: {topic}"),
+            Err(e) => log::error!("구독 실패 ({topic}): {e}"),
+        }
+    }
+}
+
+/// 토픽 이름 모음. 장치 ID가 들어가므로 실행 중에 만듭니다.
+pub struct Topics {
+    pub status: String,
+    pub telemetry: String,
+    pub water_cmd: String,
+    pub water_result: String,
+    pub unlock: String,
+}
+
+impl Topics {
+    pub fn new(device_id: &str) -> Self {
+        let base = format!("namo/pilot/{device_id}");
+        Self {
+            status: format!("{base}/status"),
+            telemetry: format!("{base}/telemetry"),
+            water_cmd: format!("{base}/water/cmd"),
+            water_result: format!("{base}/water/result"),
+            unlock: format!("{base}/unlock"),
+        }
+    }
+}
+
+/// 급수 명령 페이로드 (§5.3).
+#[derive(Debug, Deserialize)]
+struct WaterCommandPayload {
+    id: String,
+    issued_at: u64,
+    ttl_s: u32,
+    dose_ml: u32,
+}
+
+/// 잠금 해제 페이로드 (§5.1).
+#[derive(Debug, Deserialize)]
+struct UnlockPayload {
+    #[allow(dead_code)]
+    id: String,
+}
+
+/// Zigbee2MQTT의 누수센서 페이로드. 필요한 필드만 봅니다.
+#[derive(Debug, Deserialize)]
+struct LeakPayload {
+    water_leak: Option<bool>,
+}
+
+/// 클라이언트를 만들고 필요한 토픽을 구독합니다.
+///
+/// LWT로 `offline`을 걸어둡니다. 전원이 끊기면 브로커가 대신 발행해주므로,
+/// 게이트웨이가 장치 생존을 알 수 있습니다.
+pub fn connect(
+    url: &str,
+    client_id: &str,
+    topics: &Topics,
+) -> Result<(Publisher, EspMqttConnection), EspError> {
+    let lwt = LwtConfiguration {
+        topic: &topics.status,
+        payload: b"offline",
+        qos: QoS::AtLeastOnce,
+        retain: true,
+    };
+
+    let (client, connection) = EspMqttClient::new(
+        url,
+        &MqttClientConfiguration {
+            client_id: Some(client_id),
+            lwt: Some(lwt),
+            ..Default::default()
+        },
+    )?;
+
+    Ok((
+        Publisher {
+            client: Arc::new(Mutex::new(client)),
+        },
+        connection,
+    ))
+}
+
+/// 수신 이벤트를 처리합니다. 돌아오지 않습니다.
+///
+/// 급수 명령은 여기서 실행하지 않고 채널로 넘깁니다. 이 스레드가 펌프를 돌리면
+/// 그동안 누수 메시지를 못 받아 중단 판정이 늦어집니다.
+pub fn run_event_loop(
+    mut connection: EspMqttConnection,
+    publisher: Publisher,
+    topics: Arc<Topics>,
+    shared: Shared,
+    commands: std::sync::mpsc::Sender<WaterCommand>,
+) {
+    while let Ok(event) = connection.next() {
+        match event.payload() {
+            EventPayload::Connected(_) => {
+                log::info!("MQTT 접속됨");
+                publisher.subscribe(&topics.water_cmd);
+                publisher.subscribe(&topics.unlock);
+                publisher.subscribe(TOPIC_LEAK_TANK);
+                publisher.subscribe(TOPIC_LEAK_POT);
+                publisher.publish(&topics.status, b"online", true);
+            }
+            EventPayload::Disconnected => log::warn!("MQTT 연결 끊김"),
+            EventPayload::Received {
+                topic: Some(topic),
+                data,
+                ..
+            } => handle_message(topic, data, &topics, &shared, &commands),
+            _ => {}
+        }
+    }
+    log::warn!("MQTT 이벤트 루프가 끝났습니다");
+}
+
+fn handle_message(
+    topic: &str,
+    data: &[u8],
+    topics: &Topics,
+    shared: &Shared,
+    commands: &std::sync::mpsc::Sender<WaterCommand>,
+) {
+    if topic == TOPIC_LEAK_TANK || topic == TOPIC_LEAK_POT {
+        handle_leak(topic, data, shared);
+    } else if topic == topics.water_cmd {
+        handle_water_cmd(data, commands);
+    } else if topic == topics.unlock {
+        handle_unlock(data, shared);
+    }
+}
+
+fn handle_leak(topic: &str, data: &[u8], shared: &Shared) {
+    let payload: LeakPayload = match serde_json::from_slice(data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("누수 페이로드 파싱 실패 ({topic}): {e}");
+            return;
+        }
+    };
+
+    // Zigbee2MQTT는 배터리 보고처럼 water_leak이 없는 메시지도 보냅니다.
+    // 그런 메시지도 "센서가 살아있다"는 신호이므로 시각은 갱신합니다.
+    let Some(now) = clock::now() else {
+        return;
+    };
+
+    let Ok(mut state) = shared.lock() else {
+        return;
+    };
+
+    let sensor = if topic == TOPIC_LEAK_TANK {
+        &mut state.leak_tank
+    } else {
+        &mut state.leak_pot
+    };
+    sensor.updated_at = Some(now);
+    if let Some(detected) = payload.water_leak {
+        sensor.detected = Some(detected);
+    }
+
+    // 누수를 보면 즉시 잠급니다(S5). 물이 마른 뒤에도 잠금은 유지되며
+    // unlock 명령으로만 풀립니다.
+    if payload.water_leak == Some(true) && !state.locked {
+        state.locked = true;
+        log::error!("누수 감지. 급수를 잠급니다. unlock 명령으로만 해제됩니다.");
+    }
+}
+
+fn handle_water_cmd(data: &[u8], commands: &std::sync::mpsc::Sender<WaterCommand>) {
+    let payload: WaterCommandPayload = match serde_json::from_slice(data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("급수 명령 파싱 실패: {e}");
+            return;
+        }
+    };
+
+    let Some(id) = CommandId::new(&payload.id) else {
+        log::warn!("명령 ID가 비었거나 너무 깁니다: {:?}", payload.id);
+        return;
+    };
+
+    let command = WaterCommand {
+        id,
+        issued_at: payload.issued_at,
+        ttl_s: payload.ttl_s,
+        dose_ml: payload.dose_ml,
+    };
+
+    if commands.send(command).is_err() {
+        log::error!("펌프 워커가 없습니다. 명령을 버립니다.");
+    }
+}
+
+fn handle_unlock(data: &[u8], shared: &Shared) {
+    if serde_json::from_slice::<UnlockPayload>(data).is_err() {
+        log::warn!("unlock 페이로드 파싱 실패");
+        return;
+    }
+    let Ok(mut state) = shared.lock() else {
+        return;
+    };
+    if state.locked {
+        state.locked = false;
+        log::warn!("잠금이 수동 해제됐습니다.");
+    }
+}

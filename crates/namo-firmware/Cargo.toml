@@ -4,8 +4,14 @@ version = "0.1.0"
 edition = "2021"
 description = "나모 파일럿 ESP32-S3 펌웨어"
 
-# 본 펌웨어(src/main.rs)는 핀 매핑이 확정된 뒤 추가합니다. 지금은 bring-up
-# 보조 도구만 있습니다.
+[lib]
+name = "namo_firmware"
+path = "src/lib.rs"
+
+[[bin]]
+name = "namo-firmware"
+path = "src/main.rs"
+
 [[bin]]
 name = "pinscan"
 path = "src/bin/pinscan.rs"
@@ -29,6 +35,9 @@ path = "src/bin/wifiscan.rs"
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.52.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
 namo-core = { path = "../namo-core" }
 esp32-nimble = "0.12"
 toml-cfg = "0.2"
