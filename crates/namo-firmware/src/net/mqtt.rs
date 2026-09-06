@@ -5,7 +5,8 @@ use esp_idf_svc::mqtt::client::{
 };
 use esp_idf_svc::sys::EspError;
 use namo_core::command::{CommandId, WaterCommand};
-use serde::Deserialize;
+use namo_core::safety::RejectReason;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 use crate::clock;
@@ -147,7 +148,7 @@ pub fn run_event_loop(
                 topic: Some(topic),
                 data,
                 ..
-            } => handle_message(topic, data, &topics, &shared, &commands),
+            } => handle_message(topic, data, &topics, &shared, &commands, &publisher),
             _ => {}
         }
     }
@@ -160,11 +161,12 @@ fn handle_message(
     topics: &Topics,
     shared: &Shared,
     commands: &std::sync::mpsc::Sender<WaterCommand>,
+    publisher: &Publisher,
 ) {
     if topic == TOPIC_LEAK_TANK || topic == TOPIC_LEAK_POT {
         handle_leak(topic, data, shared);
     } else if topic == topics.water_cmd {
-        handle_water_cmd(data, commands);
+        handle_water_cmd(data, commands, shared, publisher, topics);
     } else if topic == topics.unlock {
         handle_unlock(data, shared);
     }
@@ -207,7 +209,13 @@ fn handle_leak(topic: &str, data: &[u8], shared: &Shared) {
     }
 }
 
-fn handle_water_cmd(data: &[u8], commands: &std::sync::mpsc::Sender<WaterCommand>) {
+fn handle_water_cmd(
+    data: &[u8],
+    commands: &std::sync::mpsc::Sender<WaterCommand>,
+    shared: &Shared,
+    publisher: &Publisher,
+    topics: &Topics,
+) {
     let payload: WaterCommandPayload = match serde_json::from_slice(data) {
         Ok(v) => v,
         Err(e) => {
@@ -221,6 +229,23 @@ fn handle_water_cmd(data: &[u8], commands: &std::sync::mpsc::Sender<WaterCommand
         return;
     };
 
+    // 급수 중에 들어온 명령은 여기서 바로 거부합니다(§4.6). 워커에게 넘기면
+    // 채널에 쌓였다가 앞 급수가 끝난 뒤 실행되는데, 그건 "진행 중이면
+    // 거부한다"가 아니라 "진행 중이면 미뤘다가 준다"가 됩니다.
+    //
+    // 워커도 판정할 때 running을 다시 봅니다. 그 사이 급수가 시작되는
+    // 좁은 창이 남지만, 그 경우는 쿨다운(S6)이 막습니다.
+    let running = shared
+        .lock()
+        .map(|state| state.pump == crate::state::PumpState::Running)
+        .unwrap_or(true);
+
+    if running {
+        log::warn!("명령 {}: 급수 진행 중이라 거부합니다.", payload.id);
+        reject(publisher, topics, &payload.id, RejectReason::AlreadyRunning);
+        return;
+    }
+
     let command = WaterCommand {
         id,
         issued_at: payload.issued_at,
@@ -230,6 +255,35 @@ fn handle_water_cmd(data: &[u8], commands: &std::sync::mpsc::Sender<WaterCommand
 
     if commands.send(command).is_err() {
         log::error!("펌프 워커가 없습니다. 명령을 버립니다.");
+    }
+}
+
+/// 거부 결과 페이로드 (§5.4). 워커가 만드는 것과 같은 모양이어야 합니다.
+#[derive(Serialize)]
+struct RejectResult<'a> {
+    id: &'a str,
+    status: &'static str,
+    reason: &'static str,
+    estimated_ml: u32,
+    pump_ms: u32,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+}
+
+fn reject(publisher: &Publisher, topics: &Topics, id: &str, reason: RejectReason) {
+    let now = clock::now();
+    let result = RejectResult {
+        id,
+        status: "rejected",
+        reason: reason.as_str(),
+        estimated_ml: 0,
+        pump_ms: 0,
+        started_at: now,
+        finished_at: now,
+    };
+    match serde_json::to_vec(&result) {
+        Ok(payload) => publisher.publish(&topics.water_result, &payload, false),
+        Err(e) => log::error!("거부 결과 직렬화 실패: {e}"),
     }
 }
 
