@@ -544,5 +544,7 @@ T13이 통과하지 않으면 게이트 풀다운을 다시 확인합니다.
 | BLE 값이 아예 안 옴 | HHCC 배터리 → Flower Care 앱 연결 상태(앱이 점유 중이면 광고가 끊길 수 있음) |
 | WiFi 연결 실패 | 2.4GHz SSID인지 확인 |
 | `Failed to run Python dependency check` | Python 문제가 아님. `ESP_IDF_VERSION = "v5.4.4"` 고정 (Stage 0 참고) |
+| WiFi 접속이 `ESP_ERR_TIMEOUT`으로 실패 | SSID·비밀번호를 의심하기 전에 `wifiscan`을 돌립니다. AP가 목록에 없거나 -80dBm 이하면 신호 문제이지 설정 문제가 아닙니다. 소형 보드는 외장 안테나(IPEX)가 없으면 -90dBm대가 나옵니다 |
+| BLE는 되는데 WiFi만 안 됨 | 모순이 아닙니다. BLE 기기는 보통 코앞에 있어 안테나 없이도 잡히고, 공유기는 멀어서 안 잡힙니다 |
 | Zigbee 어댑터를 못 엶 | `adapter: ember` 확인, 포트 경로 확인, 다른 프로세스가 점유 중인지 확인 |
 | 급수가 계속 거부됨 | `water/result`의 `reason` 확인. `leak_stale`이면 Zigbee2MQTT가 죽은 것 |

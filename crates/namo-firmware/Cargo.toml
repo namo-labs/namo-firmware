@@ -18,11 +18,20 @@ path = "src/bin/floattest.rs"
 name = "blescan"
 path = "src/bin/blescan.rs"
 
+[[bin]]
+name = "netcheck"
+path = "src/bin/netcheck.rs"
+
+[[bin]]
+name = "wifiscan"
+path = "src/bin/wifiscan.rs"
+
 [dependencies]
 log = "0.4"
 esp-idf-svc = "0.52.1"
 namo-core = { path = "../namo-core" }
 esp32-nimble = "0.12"
+toml-cfg = "0.2"
 
 [build-dependencies]
 embuild = "0.33"
