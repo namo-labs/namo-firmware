@@ -1,0 +1,15 @@
+# 이 파일을 cfg.toml로 복사한 뒤 실제 값을 채웁니다.
+# cfg.toml은 .gitignore에 있어 커밋되지 않습니다. 절대 커밋하지 마세요.
+
+[namo-firmware]
+# ESP32-S3는 2.4GHz만 지원합니다. 공유기가 대역별로 SSID를 나눠 쓴다면
+# _5G가 붙지 않은 쪽을 적습니다.
+wifi_ssid = "여기에 SSID"
+wifi_psk = "여기에 비밀번호"
+
+# 브로커가 도는 호스트의 LAN IP입니다. localhost나 127.0.0.1은 보드 자신을
+# 가리키므로 쓸 수 없습니다.
+mqtt_url = "mqtt://192.168.0.10:1883"
+
+# MQTT 토픽의 장치 식별자. namo/pilot/<id>/... 형태로 쓰입니다.
+device_id = "pilot01"
