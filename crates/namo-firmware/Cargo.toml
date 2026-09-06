@@ -1,0 +1,25 @@
+[package]
+name = "namo-firmware"
+version = "0.1.0"
+edition = "2021"
+description = "나모 파일럿 ESP32-S3 펌웨어"
+
+# 본 펌웨어(src/main.rs)는 핀 매핑이 확정된 뒤 추가합니다. 지금은 bring-up
+# 보조 도구만 있습니다.
+[[bin]]
+name = "pinscan"
+path = "src/bin/pinscan.rs"
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = "0.52.1"
+
+[build-dependencies]
+embuild = "0.33"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+opt-level = "z"
+debug = true
