@@ -23,6 +23,7 @@ const SCAN_MS: i32 = 10_000;
 /// 값을 버립니다. 신선도를 판단할 수 없는 측정값은 텔레메트리에서
 /// `sensor_seen_ago_s`를 거짓말하게 만들기 때문입니다.
 pub fn run(shared: Shared) {
+    log::info!("BLE 스캔 태스크 시작");
     let target = BleUuid::from_uuid16(MIBEACON_UUID);
     let mut last_seen: Option<([u8; 6], u8)> = None;
 

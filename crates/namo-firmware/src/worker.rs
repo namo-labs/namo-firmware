@@ -39,6 +39,7 @@ pub fn run(
     publisher: Publisher,
     topics: std::sync::Arc<Topics>,
 ) {
+    log::info!("급수 워커 시작");
     while let Ok(command) = commands.recv() {
         handle(&command, &mut pump, &shared, &publisher, &topics);
     }

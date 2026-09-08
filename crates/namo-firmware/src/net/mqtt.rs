@@ -34,6 +34,11 @@ impl Publisher {
         }
     }
 
+    /// 구독합니다.
+    ///
+    /// **MQTT 이벤트 루프 스레드에서 부르면 안 됩니다.** SUBACK을 기다리는데
+    /// 그 응답은 이벤트 루프가 받아야 하므로, 자기가 기다리는 것을 자기가
+    /// 처리하지 못해 멈춥니다.
     fn subscribe(&self, topic: &str) {
         let Ok(mut client) = self.client.lock() else {
             return;
@@ -132,16 +137,19 @@ pub fn run_event_loop(
     topics: Arc<Topics>,
     shared: Shared,
     commands: std::sync::mpsc::Sender<WaterCommand>,
+    on_connect: std::sync::mpsc::Sender<()>,
 ) {
     while let Ok(event) = connection.next() {
         match event.payload() {
             EventPayload::Connected(_) => {
                 log::info!("MQTT 접속됨");
-                publisher.subscribe(&topics.water_cmd);
-                publisher.subscribe(&topics.unlock);
-                publisher.subscribe(TOPIC_LEAK_TANK);
-                publisher.subscribe(TOPIC_LEAK_POT);
-                publisher.publish(&topics.status, b"online", true);
+                // 구독은 여기서 하지 않습니다. subscribe는 SUBACK을 기다리고
+                // 그 응답은 이 루프가 받아야 하므로, 여기서 부르면 자기가
+                // 기다리는 것을 자기가 처리하지 못해 멈춥니다. 클라이언트
+                // 락까지 쥔 채로 멈추므로 텔레메트리 발행도 같이 막힙니다.
+                if on_connect.send(()).is_err() {
+                    log::error!("구독 담당 태스크가 없습니다");
+                }
             }
             EventPayload::Disconnected => log::warn!("MQTT 연결 끊김"),
             EventPayload::Received {
@@ -153,6 +161,30 @@ pub fn run_event_loop(
         }
     }
     log::warn!("MQTT 이벤트 루프가 끝났습니다");
+}
+
+/// 접속될 때마다 구독을 다시 겁니다. 돌아오지 않습니다.
+///
+/// 이벤트 루프와 **다른 스레드**여야 합니다. 이유는 [`run_event_loop`]의
+/// `Connected` 처리에 적어두었습니다.
+///
+/// 재접속 때도 다시 구독해야 합니다. 브로커가 세션을 유지하지 않으면
+/// 구독이 사라지는데, 그러면 급수 명령이 조용히 도착하지 않게 됩니다.
+pub fn run_subscriber(
+    on_connect: std::sync::mpsc::Receiver<()>,
+    publisher: Publisher,
+    topics: Arc<Topics>,
+) {
+    log::info!("MQTT 구독 태스크 시작");
+    while on_connect.recv().is_ok() {
+        publisher.subscribe(&topics.water_cmd);
+        publisher.subscribe(&topics.unlock);
+        publisher.subscribe(TOPIC_LEAK_TANK);
+        publisher.subscribe(TOPIC_LEAK_POT);
+        publisher.publish(&topics.status, b"online", true);
+        log::info!("구독 완료. status=online 발행");
+    }
+    log::warn!("구독 태스크가 끝났습니다");
 }
 
 fn handle_message(
