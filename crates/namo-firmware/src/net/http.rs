@@ -61,7 +61,11 @@ tick(); setInterval(tick, 2000);
 ///
 /// 반환된 핸들을 살려둬야 서버가 계속 돕니다. 떨어뜨리면 즉시 내려갑니다.
 pub fn start(shared: Shared) -> Result<EspHttpServer<'static>, EspIOError> {
-    let mut server = EspHttpServer::new(&Configuration::default())?;
+    // 기본 스택으로는 핸들러 안에서 JSON을 만들다 넘칠 수 있습니다.
+    let mut server = EspHttpServer::new(&Configuration {
+        stack_size: 8192,
+        ..Default::default()
+    })?;
 
     server.fn_handler("/", Method::Get, |request| {
         request

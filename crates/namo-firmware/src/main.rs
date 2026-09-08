@@ -87,12 +87,21 @@ fn main() -> anyhow::Result<()> {
 
     // ── 태스크 기동 ───────────────────────────────────────────────
     let (tx, rx) = mpsc::channel();
+    let (connect_tx, connect_rx) = mpsc::channel();
 
     spawn("mqtt", 6000, {
         let publisher = publisher.clone();
         let topics = topics.clone();
         let shared = shared.clone();
-        move || net::mqtt::run_event_loop(connection, publisher, topics, shared, tx)
+        move || net::mqtt::run_event_loop(connection, publisher, topics, shared, tx, connect_tx)
+    })?;
+
+    // 구독은 이벤트 루프와 다른 스레드에서 해야 합니다. 같은 스레드에서
+    // 하면 SUBACK을 기다리다 자기 자신을 막습니다.
+    spawn("mqtt_sub", 4000, {
+        let publisher = publisher.clone();
+        let topics = topics.clone();
+        move || net::mqtt::run_subscriber(connect_rx, publisher, topics)
     })?;
 
     spawn("pump_worker", 6000, {
@@ -102,7 +111,8 @@ fn main() -> anyhow::Result<()> {
         move || worker::run(rx, pump, shared, publisher, topics)
     })?;
 
-    spawn("telemetry", 6000, {
+    // JSON 직렬화가 스택을 제법 씁니다.
+    spawn("telemetry", 8000, {
         let shared = shared.clone();
         let publisher = publisher.clone();
         let topics = topics.clone();

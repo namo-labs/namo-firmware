@@ -82,10 +82,19 @@ pub fn snapshot(shared: &Shared) -> Option<Telemetry> {
 
 /// 주기적으로 현재 상태를 발행합니다. 돌아오지 않습니다.
 pub fn run(shared: Shared, publisher: Publisher, topics: Arc<Topics>) {
+    log::info!("텔레메트리 태스크 시작 ({TELEMETRY_PERIOD_S}초 주기)");
+    let mut seq: u32 = 0;
+
     loop {
         match snapshot(&shared) {
             Some(payload) => match serde_json::to_vec(&payload) {
-                Ok(bytes) => publisher.publish(&topics.telemetry, &bytes, false),
+                Ok(bytes) => {
+                    seq += 1;
+                    // 발행 성공에도 로그를 남깁니다. 조용한 것과 죽은 것을
+                    // 구분할 수 없으면 bring-up 중에 원인을 좁힐 수 없습니다.
+                    log::info!("텔레메트리 #{seq} ({}바이트)", bytes.len());
+                    publisher.publish(&topics.telemetry, &bytes, false);
+                }
                 Err(e) => log::error!("텔레메트리 직렬화 실패: {e}"),
             },
             None => log::error!("상태 락이 깨졌습니다"),
