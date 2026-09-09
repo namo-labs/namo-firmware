@@ -33,6 +33,10 @@ name = "pumptest"
 path = "src/bin/pumptest.rs"
 
 [[bin]]
+name = "pumprun"
+path = "src/bin/pumprun.rs"
+
+[[bin]]
 name = "wifiscan"
 path = "src/bin/wifiscan.rs"
 
