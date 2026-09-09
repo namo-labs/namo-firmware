@@ -29,6 +29,10 @@ name = "netcheck"
 path = "src/bin/netcheck.rs"
 
 [[bin]]
+name = "pumptest"
+path = "src/bin/pumptest.rs"
+
+[[bin]]
 name = "wifiscan"
 path = "src/bin/wifiscan.rs"
 
