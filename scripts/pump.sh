@@ -38,5 +38,11 @@ cd "$CRATE"
 PUMP_RUN_MS=$((RUN_S * 1000)) PUMP_COUNTDOWN_S="$COUNTDOWN_S" \
     cargo build --release --bin pumprun
 
-espflash flash --port "$PORT" --monitor \
-    target/xtensa-esp32s3-espidf/release/pumprun
+if ! espflash flash --port "$PORT" --monitor \
+    target/xtensa-esp32s3-espidf/release/pumprun; then
+    echo >&2
+    echo "플래싱에 실패했습니다." >&2
+    echo "'Device or resource busy'라면 다른 프로그램이 포트를 잡고 있는 것입니다." >&2
+    echo "다른 터미널의 espflash monitor나 시리얼 모니터를 닫고 다시 시도하세요." >&2
+    exit 1
+fi
