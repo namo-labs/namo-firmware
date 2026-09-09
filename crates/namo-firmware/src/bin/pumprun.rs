@@ -13,14 +13,24 @@ use namo_firmware::hw::pump::Pump;
 use std::thread::sleep;
 use std::time::Duration;
 
-/// 구동 시간. Stage 3은 2초로 시작합니다.
-const RUN_MS: u32 = 2_000;
-/// 플래싱 직후 바로 돌면 준비할 틈이 없으므로 기다립니다.
+/// 구동 시간(ms). `PUMP_RUN_MS` 환경변수로 빌드할 때 바꿀 수 있습니다.
 ///
-/// 12V는 플래싱이 끝난 뒤에 연결해야 합니다. 부팅 중에는 GPIO가 잠깐 뜨는
-/// 구간이 있어 펌프가 순간적으로 돌 수 있기 때문입니다. 그 순서를 지킬
-/// 여유를 주려면 넉넉해야 합니다.
-const COUNTDOWN_S: u64 = 30;
+/// 하드리밋이 20초이므로 그보다 크게 줘도 드라이버가 잘라냅니다.
+fn run_ms() -> u32 {
+    option_env!("PUMP_RUN_MS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000)
+}
+
+/// 구동 전 대기 시간(초). `PUMP_COUNTDOWN_S`로 바꿉니다.
+///
+/// 12V를 플래싱 뒤에 연결하는 순서를 지키려면 여유가 필요합니다. 이미
+/// 연결해둔 상태라면 짧게 줘도 됩니다.
+fn countdown_s() -> u64 {
+    option_env!("PUMP_COUNTDOWN_S")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
+}
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -33,10 +43,12 @@ fn main() {
     log::info!("=== 펌프 첫 구동 ===");
     log::warn!("펌프가 물에 완전히 잠겨 있는지 확인하세요. 공회전은 펌프를 상하게 합니다.");
     log::warn!("튜브 끝이 빈 양동이 안에 있는지 확인하세요.");
-    log::info!("{}초 뒤에 {}초간 한 번만 돌립니다.", COUNTDOWN_S, RUN_MS / 1000);
+    let run_ms = run_ms();
+    let countdown_s = countdown_s();
+    log::info!("{countdown_s}초 뒤에 {}ms 동안 한 번만 돌립니다.", run_ms);
     log::warn!("지금 12V 어댑터를 콘센트에 꽂으세요.");
 
-    for remaining in (1..=COUNTDOWN_S).rev() {
+    for remaining in (1..=countdown_s).rev() {
         if remaining % 5 == 0 || remaining <= 5 {
             log::info!("  {remaining}...");
         }
@@ -44,7 +56,7 @@ fn main() {
     }
 
     log::info!("◼︎ 펌프 켬");
-    match pump.run(RUN_MS, || None) {
+    match pump.run(run_ms, || None) {
         Ok(outcome) => {
             log::info!("◻︎ 펌프 끔 ({}ms 구동)", outcome.actual_ms);
             log::info!("");
