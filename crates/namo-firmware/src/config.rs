@@ -20,7 +20,11 @@ pub const PIN_FLOAT: u8 = 5;
 ///
 /// 드라이버가 강제하므로 상위 로직이 이 값을 넘길 수 없습니다. 다른 모든
 /// 규칙이 실패해도 펌프는 이 시간 안에 꺼집니다.
-pub const MAX_PUMP_MS: u32 = 20_000;
+///
+/// 실측 유량 45 mL/s 기준으로 10초는 450mL이며, 2L 물통의 22%입니다.
+/// 정상 최대 요청인 300mL가 6.67초이므로 1.5배 여유가 있습니다. 유량이
+/// 크게 달라지면 `pilot-design.md` §4.5의 계산을 다시 합니다.
+pub const MAX_PUMP_MS: u32 = 10_000;
 
 /// 급수 중 중단조건을 다시 보는 주기 (S4·S5).
 pub const ABORT_CHECK_MS: u32 = 100;
@@ -39,12 +43,13 @@ pub const MAX_FUTURE_SKEW_S: u64 = 5;
 
 /// 유량 보정값.
 ///
-/// **Stage 4에서 계량컵으로 실측한 뒤 반드시 교체해야 하는 임시값입니다.**
-/// 카탈로그의 240L/h는 무양정 기준이라 실제 배관에서는 한참 낮습니다.
+/// **Stage 4 실측값입니다 (2026-09-11).** 10초 구동을 세 번 반복해 매번
+/// 450mL를 얻었으므로 45.0 mL/s입니다. 실제 설치 높이와 잘라낸 튜브 길이가
+/// 반영된 값이라, 튜브를 바꾸거나 화분 높이를 옮기면 다시 재야 합니다.
 ///
-/// 이 값이 틀려도 급수량이 어긋날 뿐 위험하지는 않습니다. 시간 계산이
-/// 아무리 빗나가도 [`MAX_PUMP_MS`]가 상한을 강제하기 때문입니다(S3a).
-pub const CALIBRATION: Calibration = Calibration::from_ml_per_second_x100(650);
+/// 실측 전 임시값은 6.5 mL/s였는데 실제의 7분의 1이었습니다. 그대로 뒀다면
+/// 100mL 요청에 692mL가 나갔을 것입니다.
+pub const CALIBRATION: Calibration = Calibration::from_ml_per_second_x100(4500);
 
 /// 안전 한도. `namo-core`의 기본값을 그대로 씁니다.
 pub const LIMITS: Limits = Limits::DEFAULT;
