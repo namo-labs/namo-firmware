@@ -47,9 +47,13 @@ mqtt_wait_result() {
     docker exec "$BROKER" mosquitto_sub -h localhost -t "$T_RESULT" -C 1 -W "$timeout" 2>/dev/null
 }
 
+# 텔레메트리에서 필드 하나를 읽습니다.
+#
+# `// empty`를 쓰면 안 됩니다. jq의 `//`는 좌변이 null뿐 아니라 **false**일
+# 때도 우변을 쓰므로, locked=false 같은 불린 값이 빈 문자열이 됩니다.
 telemetry_field() {
     docker exec "$BROKER" mosquitto_sub -h localhost -t "$T_TELEMETRY" -C 1 -W 15 2>/dev/null \
-        | jq -r ".$1 // empty"
+        | jq -r "if has(\"$1\") then .$1 else \"\" end"
 }
 
 now() { date +%s; }
