@@ -15,6 +15,75 @@ pub enum Leak {
     Unknown,
 }
 
+/// 누수 센서 하나의 최근 보고.
+///
+/// 배터리로 도는 Zigbee 센서는 이벤트가 있을 때만 값을 보냅니다. 그래서
+/// "값이 오래됐다"와 "센서가 죽었다"를 구분하려면 생존 여부가 따로 필요합니다.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub struct LeakSensor {
+    /// 마지막으로 보고된 누수 여부. `None`이면 아직 한 번도 못 받았습니다.
+    pub detected: Option<bool>,
+    /// 마지막 보고를 받은 시각.
+    pub updated_at: Option<u64>,
+    /// 게이트웨이가 판정한 센서 생존 여부. `None`이면 아직 모릅니다.
+    pub available: Option<bool>,
+}
+
+impl LeakSensor {
+    /// 이 센서 하나의 판정.
+    ///
+    /// 죽었다고 알려진 센서는 값이 남아 있어도 믿지 않습니다. 마지막으로
+    /// 받은 "누수 없음"은 살아 있던 시점의 이야기이기 때문입니다.
+    pub fn state(&self) -> Leak {
+        if self.available == Some(false) {
+            return Leak::Unknown;
+        }
+        match self.detected {
+            Some(true) => Leak::Detected,
+            Some(false) => Leak::None,
+            None => Leak::Unknown,
+        }
+    }
+}
+
+/// 여러 센서를 하나의 판정으로 합칩니다.
+///
+/// 하나라도 누수를 보면 `Detected`입니다. 누수가 없더라도 **하나라도 상태를
+/// 모르면** `Unknown`입니다. "한쪽은 멀쩡하니 괜찮겠지"가 아니라 "모르는 곳이
+/// 있으면 모른다"로 갑니다.
+pub fn combine_leak(sensors: &[LeakSensor]) -> Leak {
+    let mut saw_unknown = false;
+    for sensor in sensors {
+        match sensor.state() {
+            Leak::Detected => return Leak::Detected,
+            Leak::Unknown => saw_unknown = true,
+            Leak::None => {}
+        }
+    }
+    if sensors.is_empty() || saw_unknown {
+        Leak::Unknown
+    } else {
+        Leak::None
+    }
+}
+
+/// 신선도를 판단할 기준 시각. 센서 중 **가장 오래된** 보고를 씁니다.
+///
+/// 한쪽만 최근에 보고했다고 전체가 신선하다고 볼 수 없습니다. 하나라도
+/// 받은 적이 없으면 `None`이고, 그 경우 안전 판정이 거부합니다.
+pub fn oldest_update(sensors: &[LeakSensor]) -> Option<u64> {
+    let mut oldest = None;
+    for sensor in sensors {
+        let t = sensor.updated_at?;
+        oldest = Some(match oldest {
+            None => t,
+            Some(prev) if t < prev => t,
+            Some(prev) => prev,
+        });
+    }
+    oldest
+}
+
 /// 급수를 거부한 사유. 판정 순서가 곧 우선순위입니다.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum RejectReason {
@@ -81,7 +150,14 @@ impl Limits {
         max_dose_ml: 300,
         daily_limit_ml: 500,
         cooldown_s: 1_800,
-        leak_max_age_s: 300,
+        // Aqara 누수센서는 이벤트가 있을 때만 값을 보내고, 주기 보고는 약
+        // 1시간 간격입니다. 처음 잡았던 300초는 센서가 자주 보고한다는
+        // 가정에서 나온 값이라, 실제로는 한 시간 중 5분만 급수가 가능한
+        // 상태가 됐습니다. 보고 주기에 여유를 더해 90분으로 잡습니다.
+        //
+        // 센서 생존은 Zigbee2MQTT의 availability로 따로 판정합니다. 이
+        // 값은 게이트웨이가 통째로 죽었을 때를 대비한 2차 방어입니다.
+        leak_max_age_s: 5_400,
     };
 }
 
@@ -185,6 +261,97 @@ pub fn abort_reason(reservoir: Reservoir, leak: Leak) -> Option<AbortReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sensor(detected: Option<bool>, at: Option<u64>, available: Option<bool>) -> LeakSensor {
+        LeakSensor {
+            detected,
+            updated_at: at,
+            available,
+        }
+    }
+
+    #[test]
+    fn 둘_다_정상이면_누수없음() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(Some(false), Some(120), Some(true)),
+        ];
+        assert_eq!(combine_leak(&s), Leak::None);
+    }
+
+    #[test]
+    fn 하나라도_누수면_감지() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(Some(true), Some(120), Some(true)),
+        ];
+        assert_eq!(combine_leak(&s), Leak::Detected);
+    }
+
+    #[test]
+    fn 하나라도_모르면_unknown() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(None, Some(120), Some(true)),
+        ];
+        assert_eq!(combine_leak(&s), Leak::Unknown);
+    }
+
+    /// 센서가 죽었다고 알려지면 마지막 값이 무엇이든 믿지 않습니다.
+    #[test]
+    fn 죽은_센서의_값은_믿지_않는다() {
+        let s = [sensor(Some(false), Some(100), Some(false))];
+        assert_eq!(combine_leak(&s), Leak::Unknown);
+    }
+
+    /// 죽은 센서가 누수를 보고한 상태였다면 그것도 unknown입니다. 다만
+    /// unknown도 급수를 막으므로 안전 방향은 유지됩니다.
+    #[test]
+    fn 죽은_센서가_누수중이어도_unknown() {
+        let s = [sensor(Some(true), Some(100), Some(false))];
+        assert_eq!(combine_leak(&s), Leak::Unknown);
+    }
+
+    /// 살아 있는 센서의 누수가 죽은 센서보다 우선합니다.
+    #[test]
+    fn 살아있는_센서의_누수가_우선한다() {
+        let s = [
+            sensor(Some(true), Some(100), Some(true)),
+            sensor(Some(false), Some(120), Some(false)),
+        ];
+        assert_eq!(combine_leak(&s), Leak::Detected);
+    }
+
+    #[test]
+    fn 센서가_없으면_unknown() {
+        assert_eq!(combine_leak(&[]), Leak::Unknown);
+    }
+
+    /// 생존 여부를 아직 모르는 것(None)은 죽은 것과 다릅니다. 값이 있으면
+    /// 그 값을 씁니다.
+    #[test]
+    fn 생존여부_미상은_값을_그대로_쓴다() {
+        let s = [sensor(Some(false), Some(100), None)];
+        assert_eq!(combine_leak(&s), Leak::None);
+    }
+
+    #[test]
+    fn 가장_오래된_보고를_기준으로_삼는다() {
+        let s = [
+            sensor(Some(false), Some(500), Some(true)),
+            sensor(Some(false), Some(100), Some(true)),
+        ];
+        assert_eq!(oldest_update(&s), Some(100));
+    }
+
+    #[test]
+    fn 하나라도_보고가_없으면_기준시각이_없다() {
+        let s = [
+            sensor(Some(false), Some(500), Some(true)),
+            sensor(None, None, Some(true)),
+        ];
+        assert_eq!(oldest_update(&s), None);
+    }
 
     /// 설계 문서 §5.4가 나열한 값과 정확히 일치해야 합니다. 게이트웨이가
     /// 이 문자열로 분기하므로 오타가 나면 조용히 어긋납니다.
@@ -309,10 +476,23 @@ mod tests {
 
     #[test]
     fn 누수정보가_오래되면_거부한다() {
-        // 게이트웨이가 죽어 5분 넘게 갱신이 없는 상황.
+        // 게이트웨이가 죽어 허용 시간을 넘긴 상황.
+        //
+        // 임계값을 하드코딩하지 않고 Limits에서 가져옵니다. 예전에는 300초를
+        // 그대로 적어뒀는데, 센서 특성에 맞춰 정책을 바꾸자 테스트가 옛
+        // 숫자를 지키느라 실패했습니다. 검증하려는 것은 특정 초가 아니라
+        // "임계값을 넘으면 거부한다"입니다.
         let mut i = 정상();
-        i.leak_updated_at = Some(10_000 - 301);
+        i.leak_updated_at = Some(10_000 - (Limits::DEFAULT.leak_max_age_s + 1));
         assert_eq!(evaluate(&i, &Limits::DEFAULT), Err(RejectReason::LeakStale));
+    }
+
+    #[test]
+    fn 누수정보가_임계값_이내면_통과한다() {
+        // 경계 바로 안쪽. 여기서 거부되면 정상 운전이 막힙니다.
+        let mut i = 정상();
+        i.leak_updated_at = Some(10_000 - Limits::DEFAULT.leak_max_age_s);
+        assert_eq!(evaluate(&i, &Limits::DEFAULT), Ok(()));
     }
 
     #[test]

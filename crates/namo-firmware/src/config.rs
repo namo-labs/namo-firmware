@@ -58,3 +58,12 @@ pub const LIMITS: Limits = Limits::DEFAULT;
 pub const TOPIC_LEAK_TANK: &str = "zigbee2mqtt/leak_tank";
 /// 화분 주변 누수 센서 토픽.
 pub const TOPIC_LEAK_POT: &str = "zigbee2mqtt/leak_pot";
+
+/// 센서 생존 여부 토픽.
+///
+/// 누수센서는 배터리 기기라 이벤트가 있을 때만 값을 보냅니다. 마지막 값이
+/// 오래됐다는 것만으로는 센서가 죽었는지 조용한 것인지 구분할 수 없어,
+/// Zigbee2MQTT가 판정한 생존 여부를 함께 봅니다.
+pub const TOPIC_LEAK_TANK_AVAIL: &str = "zigbee2mqtt/leak_tank/availability";
+/// 화분 주변 누수 센서의 생존 여부 토픽.
+pub const TOPIC_LEAK_POT_AVAIL: &str = "zigbee2mqtt/leak_pot/availability";

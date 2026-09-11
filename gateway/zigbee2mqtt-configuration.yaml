@@ -28,3 +28,27 @@ advanced:
 
 homeassistant:
   enabled: false
+
+# 센서 생존 여부를 별도 토픽으로 알립니다 (`zigbee2mqtt/<name>/availability`).
+#
+# 누수센서는 배터리 기기라 이벤트가 있을 때만 값을 보냅니다. "마지막 값이
+# 오래됐다"만으로 판단하면 멀쩡한 센서를 죽었다고 오판하게 되므로,
+# Zigbee2MQTT가 직접 판정한 생존 여부를 함께 씁니다.
+availability:
+  enabled: true
+  passive:
+    # 배터리 기기의 무응답 허용 시간(분). 기본 1500분(25시간)은 너무 길어
+    # 센서가 죽어도 하루가 지나야 알아챕니다. Aqara 누수센서의 주기 보고가
+    # 약 1시간이므로 여유를 두고 90분으로 잡습니다.
+    timeout: 90
+
+devices:
+  # retain을 켜면 브로커가 마지막 상태를 보관합니다. ESP32가 재부팅한 뒤
+  # 구독하자마자 값을 받으므로, 누수 이벤트가 없는 동안 계속 `unknown`에
+  # 갇혀 급수를 못 하는 상황을 막습니다.
+  '0x00158d008c842462':
+    friendly_name: leak_tank
+    retain: true
+  '0x00158d008b7d8e17':
+    friendly_name: leak_pot
+    retain: true

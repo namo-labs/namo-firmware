@@ -152,8 +152,12 @@ fn 보정값이_틀려도_하드리밋이_막는다() {
 /// Stage 7 — 게이트웨이가 죽으면 급수가 막힙니다(fail-closed).
 #[test]
 fn 게이트웨이_두절은_급수를_막는다() {
+    // 게이트웨이가 죽어 누수 정보가 허용 시간을 넘긴 상황.
+    //
+    // 허용 시간을 하드코딩하지 않고 Limits에서 가져옵니다. 센서 특성에 맞춰
+    // 정책이 바뀌어도 검증하려는 것은 그대로이기 때문입니다.
     let mut input = 정상_입력();
-    input.leak_updated_at = Some(NOW - 600); // 10분간 갱신 없음
+    input.leak_updated_at = Some(NOW - (Limits::DEFAULT.leak_max_age_s + 1));
     assert_eq!(evaluate(&input, &Limits::DEFAULT), Err(RejectReason::LeakStale));
 }
 
