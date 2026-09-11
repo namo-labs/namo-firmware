@@ -38,6 +38,7 @@ const LABELS = {
   soil_moisture_pct: "흙 수분 (%)", soil_temperature_c: "온도 (℃)",
   illuminance_lux: "조도 (lux)", soil_conductivity_us_cm: "전도도 (µS/cm)",
   sensor_seen_ago_s: "센서 수신 경과 (초)", leak_seen_ago_s: "누수 수신 경과 (초)",
+  leak_sensors_online: "누수센서 생존",
   today_estimated_ml: "오늘 급수 (mL)", locked: "잠김", ts: "장치 시각"
 };
 async function tick() {
@@ -48,7 +49,7 @@ async function tick() {
         let v = s[k];
         if (v === null || v === undefined) v = "—";
         const bad = (k === "leak" && v === "detected") || (k === "locked" && v === true)
-                 || (k === "reservoir" && v !== "ok");
+                 || (k === "reservoir" && v !== "ok") || (k === "leak_sensors_online" && v === false);
         return `<tr><th>${label}</th><td class="${bad ? "warn" : ""}">${v}</td></tr>`;
       }).join("");
   } catch (e) { /* 갱신 실패는 다음 주기에 다시 시도합니다 */ }

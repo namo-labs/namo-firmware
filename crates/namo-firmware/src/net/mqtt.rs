@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 use crate::clock;
-use crate::config::{TOPIC_LEAK_POT, TOPIC_LEAK_TANK};
+use crate::config::{
+    TOPIC_LEAK_POT, TOPIC_LEAK_POT_AVAIL, TOPIC_LEAK_TANK, TOPIC_LEAK_TANK_AVAIL,
+};
 use crate::state::Shared;
 
 /// 브로커에 보낼 수 있는 클라이언트. 여러 태스크가 나눠 씁니다.
@@ -92,6 +94,12 @@ struct UnlockPayload {
 #[derive(Debug, Deserialize)]
 struct LeakPayload {
     water_leak: Option<bool>,
+}
+
+/// 센서 생존 여부 페이로드. `{"state":"online"}` 형태입니다.
+#[derive(Debug, Deserialize)]
+struct AvailabilityPayload {
+    state: String,
 }
 
 /// 클라이언트를 만들고 필요한 토픽을 구독합니다.
@@ -181,6 +189,8 @@ pub fn run_subscriber(
         publisher.subscribe(&topics.unlock);
         publisher.subscribe(TOPIC_LEAK_TANK);
         publisher.subscribe(TOPIC_LEAK_POT);
+        publisher.subscribe(TOPIC_LEAK_TANK_AVAIL);
+        publisher.subscribe(TOPIC_LEAK_POT_AVAIL);
         publisher.publish(&topics.status, b"online", true);
         log::info!("구독 완료. status=online 발행");
     }
@@ -197,6 +207,8 @@ fn handle_message(
 ) {
     if topic == TOPIC_LEAK_TANK || topic == TOPIC_LEAK_POT {
         handle_leak(topic, data, shared);
+    } else if topic == TOPIC_LEAK_TANK_AVAIL || topic == TOPIC_LEAK_POT_AVAIL {
+        handle_availability(topic, data, shared);
     } else if topic == topics.water_cmd {
         handle_water_cmd(data, commands, shared, publisher, topics);
     } else if topic == topics.unlock {
@@ -239,6 +251,41 @@ fn handle_leak(topic: &str, data: &[u8], shared: &Shared) {
         state.locked = true;
         log::error!("누수 감지. 급수를 잠급니다. unlock 명령으로만 해제됩니다.");
     }
+}
+
+/// 센서 생존 여부를 반영합니다.
+///
+/// Zigbee2MQTT는 버전에 따라 `{"state":"online"}` 또는 그냥 `online`을
+/// 보냅니다. 둘 다 받습니다.
+fn handle_availability(topic: &str, data: &[u8], shared: &Shared) {
+    let raw = core::str::from_utf8(data).unwrap_or("").trim();
+    let state = match serde_json::from_slice::<AvailabilityPayload>(data) {
+        Ok(p) => p.state,
+        Err(_) => raw.to_string(),
+    };
+
+    let available = match state.as_str() {
+        "online" => true,
+        "offline" => false,
+        other => {
+            log::warn!("알 수 없는 availability 값 ({topic}): {other}");
+            return;
+        }
+    };
+
+    let Ok(mut st) = shared.lock() else {
+        return;
+    };
+    let sensor = if topic == TOPIC_LEAK_TANK_AVAIL {
+        &mut st.leak_tank
+    } else {
+        &mut st.leak_pot
+    };
+
+    if sensor.available != Some(available) {
+        log::info!("{topic}: {}", if available { "online" } else { "offline" });
+    }
+    sensor.available = Some(available);
 }
 
 fn handle_water_cmd(

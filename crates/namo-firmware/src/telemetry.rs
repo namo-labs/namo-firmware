@@ -23,6 +23,8 @@ pub struct Telemetry {
     pub reservoir: &'static str,
     pub leak: &'static str,
     pub leak_seen_ago_s: Option<u64>,
+    /// 누수 센서가 살아 있는지. 하나라도 죽으면 누수 판정이 unknown이 됩니다.
+    pub leak_sensors_online: bool,
     pub pump: &'static str,
     pub today_estimated_ml: u32,
     pub cooldown_until: Option<u64>,
@@ -73,6 +75,8 @@ pub fn snapshot(shared: &Shared) -> Option<Telemetry> {
         leak_seen_ago_s: now
             .zip(state.leak_updated_at())
             .map(|(t, seen)| t.saturating_sub(seen)),
+        leak_sensors_online: state.leak_tank.available != Some(false)
+            && state.leak_pot.available != Some(false),
         pump: state.pump.as_str(),
         today_estimated_ml: now.map_or(0, |t| state.daily.today_ml(t, KST_OFFSET_S)),
         cooldown_until,

@@ -6,7 +6,7 @@
 
 use namo_core::command::RecentIds;
 use namo_core::daily::{DailyTotal, KST_OFFSET_S};
-use namo_core::safety::{Leak, Reservoir, SafetyInput};
+use namo_core::safety::{self, Leak, LeakSensor, Reservoir, SafetyInput};
 use namo_core::telemetry::SensorState;
 use std::sync::{Arc, Mutex};
 
@@ -22,23 +22,6 @@ impl PumpState {
         match self {
             PumpState::Idle => "idle",
             PumpState::Running => "running",
-        }
-    }
-}
-
-/// 누수 센서 하나의 최근 보고.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LeakSensor {
-    pub detected: Option<bool>,
-    pub updated_at: Option<u64>,
-}
-
-impl LeakSensor {
-    fn state(&self) -> Leak {
-        match self.detected {
-            Some(true) => Leak::Detected,
-            Some(false) => Leak::None,
-            None => Leak::Unknown,
         }
     }
 }
@@ -80,31 +63,14 @@ impl SharedState {
         }
     }
 
-    /// 두 누수 센서를 합친 상태.
-    ///
-    /// 하나라도 물을 감지하면 `Detected`입니다. 감지가 없더라도 둘 중 하나라도
-    /// 소식을 모르면 `Unknown`으로 봅니다. "한쪽은 멀쩡하니 괜찮겠지"가
-    /// 아니라 "모르는 곳이 있으면 모른다"로 취급합니다(S10).
+    /// 두 누수 센서를 합친 상태. 판정은 `namo-core`에 있습니다.
     pub fn leak(&self) -> Leak {
-        let states = [self.leak_tank.state(), self.leak_pot.state()];
-        if states.contains(&Leak::Detected) {
-            Leak::Detected
-        } else if states.contains(&Leak::Unknown) {
-            Leak::Unknown
-        } else {
-            Leak::None
-        }
+        safety::combine_leak(&[self.leak_tank, self.leak_pot])
     }
 
     /// 누수 정보의 신선도를 판단할 기준 시각.
-    ///
-    /// 두 센서 중 **더 오래된** 쪽을 씁니다. 한쪽만 최근에 보고했다고 해서
-    /// 전체가 신선하다고 볼 수 없습니다.
     pub fn leak_updated_at(&self) -> Option<u64> {
-        match (self.leak_tank.updated_at, self.leak_pot.updated_at) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            _ => None,
-        }
+        safety::oldest_update(&[self.leak_tank, self.leak_pot])
     }
 
     /// 안전 판정에 넘길 입력을 만듭니다.
