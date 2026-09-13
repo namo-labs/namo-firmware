@@ -67,3 +67,11 @@ pub const TOPIC_LEAK_POT: &str = "zigbee2mqtt/leak_pot";
 pub const TOPIC_LEAK_TANK_AVAIL: &str = "zigbee2mqtt/leak_tank/availability";
 /// 화분 주변 누수 센서의 생존 여부 토픽.
 pub const TOPIC_LEAK_POT_AVAIL: &str = "zigbee2mqtt/leak_pot/availability";
+
+/// Zigbee2MQTT 자신의 생존 여부 토픽.
+///
+/// 센서별 availability는 게이트웨이가 판정해 발행하는 값이라, 게이트웨이가
+/// 죽으면 마지막 값인 `online`에 retain된 채로 멈춥니다. 그 값을 그대로
+/// 믿으면 누수를 감지할 수단이 없는데도 급수를 허용하게 되므로, 게이트웨이
+/// 자신의 LWT를 함께 봅니다.
+pub const TOPIC_Z2M_BRIDGE_STATE: &str = "zigbee2mqtt/bridge/state";

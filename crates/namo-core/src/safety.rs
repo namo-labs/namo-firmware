@@ -51,7 +51,16 @@ impl LeakSensor {
 /// 하나라도 누수를 보면 `Detected`입니다. 누수가 없더라도 **하나라도 상태를
 /// 모르면** `Unknown`입니다. "한쪽은 멀쩡하니 괜찮겠지"가 아니라 "모르는 곳이
 /// 있으면 모른다"로 갑니다.
-pub fn combine_leak(sensors: &[LeakSensor]) -> Leak {
+///
+/// `gateway`는 센서 값을 날라주는 게이트웨이(Zigbee2MQTT)의 생존 여부입니다.
+/// 게이트웨이가 죽으면 개별 센서의 `available`은 마지막 값에 멈춰 있으므로,
+/// 센서가 살아 있는지 알 길이 없습니다. `None`은 아직 모르는 상태이고, 그
+/// 경우 센서 자신의 판정에 맡깁니다.
+pub fn combine_leak(gateway: Option<bool>, sensors: &[LeakSensor]) -> Leak {
+    if gateway == Some(false) {
+        return Leak::Unknown;
+    }
+
     let mut saw_unknown = false;
     for sensor in sensors {
         match sensor.state() {
@@ -276,7 +285,7 @@ mod tests {
             sensor(Some(false), Some(100), Some(true)),
             sensor(Some(false), Some(120), Some(true)),
         ];
-        assert_eq!(combine_leak(&s), Leak::None);
+        assert_eq!(combine_leak(None, &s), Leak::None);
     }
 
     #[test]
@@ -285,7 +294,7 @@ mod tests {
             sensor(Some(false), Some(100), Some(true)),
             sensor(Some(true), Some(120), Some(true)),
         ];
-        assert_eq!(combine_leak(&s), Leak::Detected);
+        assert_eq!(combine_leak(None, &s), Leak::Detected);
     }
 
     #[test]
@@ -294,14 +303,14 @@ mod tests {
             sensor(Some(false), Some(100), Some(true)),
             sensor(None, Some(120), Some(true)),
         ];
-        assert_eq!(combine_leak(&s), Leak::Unknown);
+        assert_eq!(combine_leak(None, &s), Leak::Unknown);
     }
 
     /// 센서가 죽었다고 알려지면 마지막 값이 무엇이든 믿지 않습니다.
     #[test]
     fn 죽은_센서의_값은_믿지_않는다() {
         let s = [sensor(Some(false), Some(100), Some(false))];
-        assert_eq!(combine_leak(&s), Leak::Unknown);
+        assert_eq!(combine_leak(None, &s), Leak::Unknown);
     }
 
     /// 죽은 센서가 누수를 보고한 상태였다면 그것도 unknown입니다. 다만
@@ -309,7 +318,7 @@ mod tests {
     #[test]
     fn 죽은_센서가_누수중이어도_unknown() {
         let s = [sensor(Some(true), Some(100), Some(false))];
-        assert_eq!(combine_leak(&s), Leak::Unknown);
+        assert_eq!(combine_leak(None, &s), Leak::Unknown);
     }
 
     /// 살아 있는 센서의 누수가 죽은 센서보다 우선합니다.
@@ -319,12 +328,12 @@ mod tests {
             sensor(Some(true), Some(100), Some(true)),
             sensor(Some(false), Some(120), Some(false)),
         ];
-        assert_eq!(combine_leak(&s), Leak::Detected);
+        assert_eq!(combine_leak(None, &s), Leak::Detected);
     }
 
     #[test]
     fn 센서가_없으면_unknown() {
-        assert_eq!(combine_leak(&[]), Leak::Unknown);
+        assert_eq!(combine_leak(None, &[]), Leak::Unknown);
     }
 
     /// 생존 여부를 아직 모르는 것(None)은 죽은 것과 다릅니다. 값이 있으면
@@ -332,7 +341,53 @@ mod tests {
     #[test]
     fn 생존여부_미상은_값을_그대로_쓴다() {
         let s = [sensor(Some(false), Some(100), None)];
-        assert_eq!(combine_leak(&s), Leak::None);
+        assert_eq!(combine_leak(None, &s), Leak::None);
+    }
+
+    /// 게이트웨이가 죽으면 센서가 살아 있는지 알 길이 없습니다.
+    ///
+    /// Zigbee2MQTT가 크래시하면 각 센서의 availability는 마지막 값인
+    /// `online`에 retain된 채로 남습니다. 그 값을 그대로 믿으면 누수를 감지할
+    /// 수단이 전혀 없는데도 급수를 허용하게 됩니다.
+    #[test]
+    fn 게이트웨이가_죽으면_센서값을_믿지_않는다() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(Some(false), Some(120), Some(true)),
+        ];
+        assert_eq!(combine_leak(Some(false), &s), Leak::Unknown);
+    }
+
+    /// 게이트웨이가 죽기 직전에 받은 누수 보고도 unknown이 됩니다. 어느 쪽이든
+    /// 급수를 막으므로 안전 방향은 같습니다.
+    #[test]
+    fn 게이트웨이가_죽으면_누수보고도_unknown() {
+        let s = [sensor(Some(true), Some(100), Some(true))];
+        assert_eq!(combine_leak(Some(false), &s), Leak::Unknown);
+    }
+
+    /// 게이트웨이가 살아 있으면 판정은 센서들에게 맡깁니다.
+    #[test]
+    fn 게이트웨이가_살아있으면_센서_판정을_따른다() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(Some(false), Some(120), Some(true)),
+        ];
+        assert_eq!(combine_leak(Some(true), &s), Leak::None);
+
+        let s = [sensor(Some(true), Some(100), Some(true))];
+        assert_eq!(combine_leak(Some(true), &s), Leak::Detected);
+    }
+
+    /// 게이트웨이가 살아 있어도 센서 하나가 죽었으면 여전히 unknown입니다.
+    /// 두 층의 판정은 서로를 덮어쓰지 않습니다.
+    #[test]
+    fn 게이트웨이가_살아있어도_죽은_센서는_unknown() {
+        let s = [
+            sensor(Some(false), Some(100), Some(true)),
+            sensor(Some(false), Some(120), Some(false)),
+        ];
+        assert_eq!(combine_leak(Some(true), &s), Leak::Unknown);
     }
 
     #[test]
