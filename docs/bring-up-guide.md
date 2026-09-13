@@ -510,6 +510,26 @@ export PATH="/opt/homebrew/opt/node@24/bin:$PATH"
 cd ~/zigbee2mqtt && node index.js
 ```
 
+**첫 줄을 빠뜨리면 안 됩니다.** 시스템 기본 node(Homebrew `node`)는 Zigbee2MQTT가
+지원하는 범위를 벗어나 있습니다. 버전이 맞지 않으면 `serialport` 네이티브 모듈이
+어긋나, 포트는 열리고 ASH 핸드셰이크(RSTACK)까지 성공한 뒤 첫 EZSP 명령에서만
+멈춥니다.
+
+증상이 어댑터 고장과 똑같이 보입니다.
+
+```
+zh:ember:uart:ash: ======== ASH connected ========
+zh:ember:ezsp: ERROR Transaction failure; status=ASH_ERROR_TIMEOUTS.
+               Last Frame: [FRAME: ID=0:"VERSION"]
+```
+
+2026-09-14에 이 증상으로 세 시간을 썼습니다. 동글을 뽑았다 꽂고, 포트를 바꾸고,
+흐름제어를 바꾸고, 부트로더로 들어가 펌웨어까지 새로 올렸지만 전부 그대로였습니다.
+원인은 `node@24` 대신 기본 node로 실행한 것 하나였습니다.
+
+**하드웨어를 의심하기 전에 `node --version`부터 봅니다.** 로그 첫 줄의
+`requires node version ... you are running ...` 경고가 이미 답을 말해줍니다.
+
 ### 페어링
 
 웹 UI(`http://localhost:8080`)로 해도 되고 MQTT로 해도 됩니다.
