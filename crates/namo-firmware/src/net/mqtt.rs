@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use crate::clock;
 use crate::config::{
     TOPIC_LEAK_POT, TOPIC_LEAK_POT_AVAIL, TOPIC_LEAK_TANK, TOPIC_LEAK_TANK_AVAIL,
+    TOPIC_Z2M_BRIDGE_STATE,
 };
 use crate::state::Shared;
 
@@ -191,6 +192,7 @@ pub fn run_subscriber(
         publisher.subscribe(TOPIC_LEAK_POT);
         publisher.subscribe(TOPIC_LEAK_TANK_AVAIL);
         publisher.subscribe(TOPIC_LEAK_POT_AVAIL);
+        publisher.subscribe(TOPIC_Z2M_BRIDGE_STATE);
         publisher.publish(&topics.status, b"online", true);
         log::info!("구독 완료. status=online 발행");
     }
@@ -209,6 +211,8 @@ fn handle_message(
         handle_leak(topic, data, shared);
     } else if topic == TOPIC_LEAK_TANK_AVAIL || topic == TOPIC_LEAK_POT_AVAIL {
         handle_availability(topic, data, shared);
+    } else if topic == TOPIC_Z2M_BRIDGE_STATE {
+        handle_bridge_state(data, shared);
     } else if topic == topics.water_cmd {
         handle_water_cmd(data, commands, shared, publisher, topics);
     } else if topic == topics.unlock {
@@ -253,24 +257,56 @@ fn handle_leak(topic: &str, data: &[u8], shared: &Shared) {
     }
 }
 
-/// 센서 생존 여부를 반영합니다.
+/// 생존 여부 페이로드를 해석합니다.
 ///
 /// Zigbee2MQTT는 버전에 따라 `{"state":"online"}` 또는 그냥 `online`을
-/// 보냅니다. 둘 다 받습니다.
-fn handle_availability(topic: &str, data: &[u8], shared: &Shared) {
+/// 보냅니다. 둘 다 받습니다. 해석할 수 없으면 `None`이고, 그 경우 호출부는
+/// 상태를 건드리지 않습니다. 모르는 값을 online으로 넘겨짚지 않습니다.
+fn parse_online(topic: &str, data: &[u8]) -> Option<bool> {
     let raw = core::str::from_utf8(data).unwrap_or("").trim();
     let state = match serde_json::from_slice::<AvailabilityPayload>(data) {
         Ok(p) => p.state,
         Err(_) => raw.to_string(),
     };
 
-    let available = match state.as_str() {
-        "online" => true,
-        "offline" => false,
+    match state.as_str() {
+        "online" => Some(true),
+        "offline" => Some(false),
         other => {
             log::warn!("알 수 없는 availability 값 ({topic}): {other}");
-            return;
+            None
         }
+    }
+}
+
+/// 게이트웨이(Zigbee2MQTT) 자신의 생존 여부를 반영합니다.
+///
+/// 이 값이 offline이면 개별 센서의 availability가 online으로 남아 있어도
+/// 누수 판정은 unknown이 됩니다. 게이트웨이가 죽은 뒤의 센서 상태는 아무도
+/// 모르기 때문입니다.
+fn handle_bridge_state(data: &[u8], shared: &Shared) {
+    let Some(online) = parse_online(TOPIC_Z2M_BRIDGE_STATE, data) else {
+        return;
+    };
+
+    let Ok(mut st) = shared.lock() else {
+        return;
+    };
+
+    if st.gateway_online != Some(online) {
+        if online {
+            log::info!("Zigbee 게이트웨이 online");
+        } else {
+            log::warn!("Zigbee 게이트웨이 offline. 누수 판정이 unknown이 되어 급수를 거부합니다.");
+        }
+    }
+    st.gateway_online = Some(online);
+}
+
+/// 센서 생존 여부를 반영합니다.
+fn handle_availability(topic: &str, data: &[u8], shared: &Shared) {
+    let Some(available) = parse_online(topic, data) else {
+        return;
     };
 
     let Ok(mut st) = shared.lock() else {

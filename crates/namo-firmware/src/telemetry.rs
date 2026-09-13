@@ -25,6 +25,9 @@ pub struct Telemetry {
     pub leak_seen_ago_s: Option<u64>,
     /// 누수 센서가 살아 있는지. 하나라도 죽으면 누수 판정이 unknown이 됩니다.
     pub leak_sensors_online: bool,
+    /// Zigbee 게이트웨이가 살아 있는지. 죽으면 센서 값과 무관하게 누수
+    /// 판정이 unknown이 됩니다. `null`이면 아직 소식을 못 들은 상태입니다.
+    pub gateway_online: Option<bool>,
     pub pump: &'static str,
     pub today_estimated_ml: u32,
     pub cooldown_until: Option<u64>,
@@ -77,6 +80,7 @@ pub fn snapshot(shared: &Shared) -> Option<Telemetry> {
             .map(|(t, seen)| t.saturating_sub(seen)),
         leak_sensors_online: state.leak_tank.available != Some(false)
             && state.leak_pot.available != Some(false),
+        gateway_online: state.gateway_online,
         pump: state.pump.as_str(),
         today_estimated_ml: now.map_or(0, |t| state.daily.today_ml(t, KST_OFFSET_S)),
         cooldown_until,

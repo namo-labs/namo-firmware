@@ -262,11 +262,18 @@ S3a와 S3b는 중복이 아니라 서로 다른 것을 막습니다. S3b는 잘�
 | 수단 | 무엇을 보나 | 누가 판정 |
 |---|---|---|
 | `availability` 토픽 | 센서가 살아 있는가 | Zigbee2MQTT (`passive.timeout` 90분) |
-| `leak_max_age_s` | 게이트웨이 자체가 죽었는가 | ESP32 (90분) |
+| `bridge/state` 토픽 | 게이트웨이가 살아 있는가 | MQTT 브로커 (Zigbee2MQTT의 LWT) |
+| `leak_max_age_s` | 값이 통째로 오래됐는가 | ESP32 (90분) |
 
-`availability`가 주 판정입니다. 센서가 조용한 것과 죽은 것을 게이트웨이가 직접 구분해주므로, 말수 적은 센서를 오판하지 않습니다. `leak_max_age_s`는 게이트웨이가 통째로 죽어 `availability`조차 오지 않는 경우를 위한 2차 방어입니다.
+`availability`가 주 판정입니다. 센서가 조용한 것과 죽은 것을 게이트웨이가 직접 구분해주므로, 말수 적은 센서를 오판하지 않습니다.
 
 Zigbee2MQTT의 센서 토픽에는 `retain`을 켭니다. ESP32가 재부팅해도 구독 즉시 마지막 상태를 받아, 누수 이벤트가 없는 동안 `unknown`에 갇히지 않습니다.
+
+**`bridge/state`를 함께 보는 이유 (2026-09-14 추가).** `retain`을 켜자 새로운 구멍이 생겼습니다. Zigbee2MQTT가 크래시하면 각 센서의 `availability`는 마지막 값인 `online`에 retain된 채로 남습니다. ESP32는 그 값을 받아 센서가 살아 있다고 믿지만, 실제로는 누수를 감지할 수단이 하나도 없습니다. `leak_max_age_s`가 2차 방어이긴 해도 90분짜리라, 그 사이에는 누수를 모른 채 급수가 허용됩니다.
+
+그래서 게이트웨이 자신의 생존도 함께 봅니다. Zigbee2MQTT는 `zigbee2mqtt/bridge/state`에 LWT를 걸어두므로, 프로세스가 어떻게 죽든 브로커가 `{"state":"offline"}`을 발행해줍니다. 이 값이 `offline`이면 센서 값이 아무리 최근이어도 누수 판정은 `unknown`이 됩니다.
+
+센서 한 개가 죽으면 그 센서를 불신하고, 게이트웨이가 죽으면 센서 전체를 불신합니다. 같은 논리를 한 층 위에 적용한 것입니다.
 
 여전히 브로커나 게이트웨이가 죽으면 급수가 불가능해집니다. 이는 의도된 동작입니다. 물을 못 주는 것보다 누수를 모른 채 물을 주는 것이 훨씬 나쁩니다.
 
@@ -319,6 +326,7 @@ requested ──▶ [안전 판정] ──▶ rejected (사유 포함)
   "leak": "none",
   "leak_seen_ago_s": 12,
   "leak_sensors_online": true,
+  "gateway_online": true,
   "pump": "idle",
   "today_estimated_ml": 150,
   "cooldown_until": 1772501800,
@@ -329,6 +337,7 @@ requested ──▶ [안전 판정] ──▶ rejected (사유 포함)
 - 아직 한 번도 수집하지 못한 센서값은 `null`입니다. 임의의 기본값으로 채우지 않습니다.
 - HHCC는 약 10초마다 값을 **하나씩** 광고하므로 네 값이 다 채워지기까지 약 40초가 걸립니다(실측). 텔레메트리를 10초마다 발행하면 같은 값이 여러 번 실리는 것이 정상이며, 수신 측은 `sensor_seen_ago_s`로 신선도를 판단합니다. 센서를 오래됐다고 볼 임계값은 40초보다 충분히 커야 합니다.
 - `reservoir`는 `ok` / `empty` / `unknown`, `leak`은 `none` / `detected` / `unknown`입니다.
+- `leak_sensors_online`은 두 누수센서가 모두 살아 있는지, `gateway_online`은 Zigbee2MQTT가 살아 있는지입니다. 둘 중 하나라도 거짓이면 `leak`은 `unknown`이 됩니다. `gateway_online`이 `null`이면 아직 게이트웨이 소식을 받지 못한 상태입니다.
 - `pump`는 `idle` / `running` / `locked`입니다.
 
 ### 5.3 급수 명령 페이로드

@@ -32,6 +32,9 @@ pub struct SharedState {
     pub reservoir: Reservoir,
     pub leak_tank: LeakSensor,
     pub leak_pot: LeakSensor,
+    /// 누수 센서를 날라주는 게이트웨이(Zigbee2MQTT)의 생존 여부.
+    /// `None`이면 아직 소식을 못 들은 상태입니다.
+    pub gateway_online: Option<bool>,
     /// 누수로 잠긴 상태(S5). `unlock` 명령으로만 풀립니다.
     pub locked: bool,
     pub pump: PumpState,
@@ -55,6 +58,7 @@ impl SharedState {
             reservoir: Reservoir::Unknown,
             leak_tank: LeakSensor::default(),
             leak_pot: LeakSensor::default(),
+            gateway_online: None,
             locked: false,
             pump: PumpState::Idle,
             last_completed_at: None,
@@ -64,8 +68,10 @@ impl SharedState {
     }
 
     /// 두 누수 센서를 합친 상태. 판정은 `namo-core`에 있습니다.
+    ///
+    /// 게이트웨이가 죽었으면 센서 값이 아무리 최근이어도 믿지 않습니다.
     pub fn leak(&self) -> Leak {
-        safety::combine_leak(&[self.leak_tank, self.leak_pot])
+        safety::combine_leak(self.gateway_online, &[self.leak_tank, self.leak_pot])
     }
 
     /// 누수 정보의 신선도를 판단할 기준 시각.
