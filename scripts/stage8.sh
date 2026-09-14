@@ -56,6 +56,14 @@ telemetry_field() {
         | jq -r "if has(\"$1\") then .$1 else \"\" end"
 }
 
+# 텔레메트리 한 장을 통째로 읽습니다. 못 받으면 빈 문자열입니다.
+#
+# 발행 주기가 10초라, 필드마다 따로 부르면 기다리는 시간이 쌓여 타임아웃이
+# 납니다. 여러 값이 필요하면 이걸로 한 번 읽고 jq로 꺼냅니다.
+telemetry_json() {
+    docker exec "$BROKER" mosquitto_sub -h localhost -t "$T_TELEMETRY" -C 1 -W 20 2>/dev/null
+}
+
 now() { date +%s; }
 new_id() { echo "t$(date +%s)$RANDOM"; }
 
@@ -119,7 +127,19 @@ preflight() {
     fi
     c_pass "장치 online"
 
-    local leak; leak="$(telemetry_field leak)"
+    # 아래 값들은 한 장에서 함께 꺼냅니다.
+    local snap; snap="$(telemetry_json)"
+    if [ -z "$snap" ]; then
+        c_fail "텔레메트리를 받지 못했습니다"
+        echo "     장치가 발행을 멈췄거나 브로커와 끊어졌습니다."
+        exit 1
+    fi
+
+    local leak; leak="$(echo "$snap" | jq -r '.leak // ""')"
+    if [ -z "$leak" ]; then
+        c_fail "텔레메트리에 leak 필드가 없습니다"
+        exit 1
+    fi
     if [ "$leak" = "unknown" ]; then
         c_fail "누수 상태가 unknown입니다. Zigbee2MQTT가 꺼져 있으면 모든 급수가 거부됩니다"
         echo "     export PATH=\"/opt/homebrew/opt/node@24/bin:\$PATH\"; cd ~/zigbee2mqtt && node index.js"
@@ -127,7 +147,7 @@ preflight() {
     fi
     c_pass "누수 상태: $leak"
 
-    c_info "물통: $(telemetry_field reservoir) · 오늘 급수: $(telemetry_field today_estimated_ml)mL"
+    c_info "물통: $(echo "$snap" | jq -r '.reservoir // "?"') · 오늘 급수: $(echo "$snap" | jq -r '.today_estimated_ml // "?"')mL · 잠금: $(echo "$snap" | jq -r 'if has("locked") then .locked else "?" end')"
 }
 
 # ── 테스트 ────────────────────────────────────────────────────────
