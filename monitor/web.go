@@ -6,13 +6,17 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 //go:embed index.html
 var indexHTML []byte
 
-func newRouter(st *state, store *Store) http.Handler {
+func newRouter(st *state, store *Store, client mqtt.Client, deviceID string, pend *pending) http.Handler {
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/water", waterHandler(client, deviceID, pend))
 
 	// Caddy가 /namo 접두사를 벗기고 넘기므로 여기서는 /stats로 옵니다.
 	// 접두사 없이 직접 띄워 확인할 때를 위해 /도 같은 화면을 줍니다.
