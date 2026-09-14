@@ -50,6 +50,18 @@
   td.bad { color: var(--warn); font-weight: 600; }
   footer { color: var(--dim); font-size: .75rem; text-align: center; margin-top: 1.5rem; }
   .empty { color: var(--dim); font-size: .85rem; text-align: center; padding: 2rem 0; }
+  .doses { display: flex; gap: .5rem; }
+  .doses button {
+    flex: 1; font: inherit; font-size: .9rem; font-weight: 500; padding: .6rem 0;
+    cursor: pointer; background: var(--card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: .5rem;
+  }
+  .doses button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .doses button.confirm { background: var(--warn); border-color: var(--warn); color: #fff; }
+  .doses button:disabled { opacity: .45; cursor: default; }
+  .result { font-size: .85rem; margin-top: .7rem; min-height: 1.2rem; }
+  .result.ok { color: var(--water); }
+  .result.no { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -77,10 +89,20 @@
 </div>
 
 <div class="card">
+  <div class="row"><strong style="font-size:.9rem">급수</strong></div>
+  <div class="doses" id="doses">
+    <button data-ml="50">50 mL</button>
+    <button data-ml="100">100 mL</button>
+    <button data-ml="200">200 mL</button>
+  </div>
+  <div class="result" id="result"></div>
+</div>
+
+<div class="card">
   <table id="detail"></table>
 </div>
 
-<footer>10초마다 갱신됩니다 · 읽기 전용</footer>
+<footer>10초마다 갱신됩니다</footer>
 
 <script>
 // Caddy가 /namo 접두사를 붙여 넘기기도 하고, 직접 띄워 볼 때는 접두사가
@@ -214,6 +236,94 @@ document.getElementById("tabs").addEventListener("click", (e) => {
     b.setAttribute("aria-pressed", String(b === btn));
   }
   loadChart();
+});
+
+// 거부 사유는 장치가 정한 문자열입니다. 그대로 보여주면 무슨 일인지
+// 알기 어려우므로 사람 말로 바꿉니다.
+const REASONS = {
+  cooldown: "쿨다운 중입니다. 조금 뒤에 다시 하세요",
+  daily_limit: "오늘 한도를 다 썼습니다",
+  reservoir_empty: "물통이 비었습니다",
+  reservoir_unknown: "물통 상태를 모릅니다",
+  leak_detected: "누수가 감지됐습니다",
+  leak_stale: "누수 상태를 믿을 수 없습니다",
+  locked: "누수로 잠겨 있습니다",
+  dose_too_large: "요청량이 상한을 넘습니다",
+  already_running: "이미 급수 중입니다",
+  clock_unsynced: "장치 시각이 맞춰지지 않았습니다",
+};
+
+const resultEl = document.getElementById("result");
+let armed = null;   // 확인을 기다리는 버튼
+let busy = false;
+
+function setDosesDisabled(v) {
+  for (const b of document.querySelectorAll("#doses button")) b.disabled = v;
+}
+
+function disarm() {
+  if (!armed) return;
+  armed.classList.remove("confirm");
+  armed.textContent = armed.dataset.ml + " mL";
+  armed = null;
+}
+
+document.getElementById("doses").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || busy) return;
+
+  // 물은 되돌릴 수 없으므로 한 번 더 묻습니다.
+  if (armed !== btn) {
+    disarm();
+    armed = btn;
+    btn.classList.add("confirm");
+    btn.textContent = "정말?";
+    resultEl.className = "result";
+    resultEl.textContent = "한 번 더 누르면 물이 나갑니다";
+    return;
+  }
+
+  const ml = Number(btn.dataset.ml);
+  disarm();
+  busy = true;
+  setDosesDisabled(true);
+  resultEl.className = "result";
+  resultEl.textContent = `${ml}mL 요청 중…`;
+
+  try {
+    const res = await fetch(api("/api/water"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dose_ml: ml }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      resultEl.className = "result no";
+      resultEl.textContent = data.error || `실패 (HTTP ${res.status})`;
+    } else if (data.status === "completed") {
+      resultEl.className = "result ok";
+      resultEl.textContent = `${data.estimated_ml}mL 나갔습니다`;
+    } else if (data.status === "aborted") {
+      resultEl.className = "result no";
+      resultEl.textContent = `중단됨 — ${REASONS[data.reason] || data.reason} (${data.estimated_ml}mL 나감)`;
+    } else {
+      resultEl.className = "result no";
+      resultEl.textContent = REASONS[data.reason] || data.reason || "거부됐습니다";
+    }
+  } catch (err) {
+    resultEl.className = "result no";
+    resultEl.textContent = "요청을 보내지 못했습니다";
+  } finally {
+    busy = false;
+    setDosesDisabled(false);
+    tick();
+  }
+});
+
+// 다른 곳을 누르면 확인 상태를 풉니다.
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#doses")) disarm();
 });
 
 async function tick() {

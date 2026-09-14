@@ -95,6 +95,7 @@ type telemetry struct {
 }
 
 type waterResult struct {
+	ID          string `json:"id"`
 	Status      string `json:"status"`
 	EstimatedML int    `json:"estimated_ml"`
 	FinishedAt  *int64 `json:"finished_at"`
@@ -113,12 +114,15 @@ func main() {
 	log.Printf("이력 %d개를 불러왔습니다", store.Len())
 
 	st := &state{}
-	client := connectMQTT(cfg, st, store)
+	pend := newPending()
+	client := connectMQTT(cfg, st, store, pend)
 
 	srv := &http.Server{
-		Addr:              cfg.addr,
-		Handler:           newRouter(st, store),
+		Addr:    cfg.addr,
+		Handler: newRouter(st, store, client, cfg.deviceID, pend),
+		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      40 * time.Second,
 	}
 
 	// 주기적으로 저장합니다. 죽어도 이 주기만큼만 잃습니다.
@@ -153,7 +157,7 @@ func main() {
 	}
 }
 
-func connectMQTT(cfg config, st *state, store *Store) mqtt.Client {
+func connectMQTT(cfg config, st *state, store *Store, pend *pending) mqtt.Client {
 	base := "namo/pilot/" + cfg.deviceID
 	topicTelemetry := base + "/telemetry"
 	topicResult := base + "/water/result"
@@ -175,7 +179,7 @@ func connectMQTT(cfg config, st *state, store *Store) mqtt.Client {
 				handleTelemetry(m.Payload(), st, store)
 			},
 			topicResult: func(_ mqtt.Client, m mqtt.Message) {
-				handleWaterResult(m.Payload(), store)
+				handleWaterResult(m.Payload(), store, pend)
 			},
 		} {
 			if tok := c.Subscribe(topic, 1, handler); tok.Wait() && tok.Error() != nil {
@@ -218,11 +222,15 @@ func handleTelemetry(payload []byte, st *state, store *Store) {
 	})
 }
 
-func handleWaterResult(payload []byte, store *Store) {
+func handleWaterResult(payload []byte, store *Store, pend *pending) {
 	var r waterResult
 	if err := json.Unmarshal(payload, &r); err != nil {
 		log.Printf("급수 결과 파싱 실패: %v", err)
 		return
+	}
+	// 웹에서 보낸 명령이면 기다리는 요청에 결과를 넘깁니다.
+	if r.ID != "" {
+		pend.deliver(r.ID, append(json.RawMessage(nil), payload...))
 	}
 	// 거부되거나 중단된 급수도 물이 나갔을 수 있으므로 양으로 판단합니다.
 	if r.EstimatedML <= 0 || r.FinishedAt == nil {
