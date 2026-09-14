@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>나모 파일럿</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --card: #fff; --fg: #1a1a18; --dim: #6b6b66;
+    --line: #e4e4e0; --accent: #2d7dd2; --water: #3aa76d; --warn: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --card: #201e1c; --fg: #ece9e4; --dim: #98938c;
+      --line: #322f2c; --accent: #63a4e8; --water: #55c98a; --warn: #e8705f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.25rem 1rem 3rem; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    line-height: 1.5; max-width: 46rem; margin-inline: auto;
+  }
+  h1 { font-size: 1.1rem; margin: 0 0 .25rem; font-weight: 600; }
+  .sub { color: var(--dim); font-size: .8rem; margin-bottom: 1.25rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: .7rem; padding: 1rem; margin-bottom: 1rem;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); gap: .9rem; }
+  .metric .label { font-size: .72rem; color: var(--dim); letter-spacing: .02em; }
+  .metric .value { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .metric .value.bad { color: var(--warn); }
+  .unit { font-size: .8rem; font-weight: 400; color: var(--dim); margin-left: .1rem; }
+  .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: .75rem; }
+  .tabs { display: flex; gap: .3rem; }
+  .tabs button {
+    font: inherit; font-size: .78rem; padding: .25rem .6rem; cursor: pointer;
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--line); border-radius: .4rem;
+  }
+  .tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  svg { display: block; width: 100%; height: auto; }
+  .legend { display: flex; gap: 1rem; font-size: .75rem; color: var(--dim); margin-top: .5rem; }
+  .swatch { display: inline-block; width: .7rem; height: .2rem; vertical-align: middle; margin-right: .3rem; border-radius: 1px; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { text-align: left; padding: .35rem 0; border-bottom: 1px solid var(--line); }
+  th { font-weight: 400; color: var(--dim); width: 45%; }
+  td.bad { color: var(--warn); font-weight: 600; }
+  footer { color: var(--dim); font-size: .75rem; text-align: center; margin-top: 1.5rem; }
+  .empty { color: var(--dim); font-size: .85rem; text-align: center; padding: 2rem 0; }
+</style>
+</head>
+<body>
+<h1>나모 파일럿</h1>
+<div class="sub" id="sub">불러오는 중…</div>
+
+<div class="card">
+  <div class="grid" id="metrics"></div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <strong style="font-size:.9rem">흙 수분</strong>
+    <div class="tabs" id="tabs">
+      <button data-h="24" aria-pressed="true">24시간</button>
+      <button data-h="168" aria-pressed="false">7일</button>
+      <button data-h="720" aria-pressed="false">30일</button>
+    </div>
+  </div>
+  <div id="chart"></div>
+  <div class="legend">
+    <span><span class="swatch" style="background:var(--accent)"></span>흙 수분</span>
+    <span><span class="swatch" style="background:var(--water);height:.7rem;width:.2rem"></span>급수</span>
+  </div>
+</div>
+
+<div class="card">
+  <table id="detail"></table>
+</div>
+
+<footer>10초마다 갱신됩니다 · 읽기 전용</footer>
+
+<script>
+// Caddy가 /namo 접두사를 붙여 넘기기도 하고, 직접 띄워 볼 때는 접두사가
+// 없기도 합니다. 지금 주소를 기준으로 API 경로를 만듭니다.
+const BASE = location.pathname.replace(/\/stats\/?$/, "").replace(/\/$/, "");
+const api = (p) => BASE + p;
+
+let hours = 24;
+
+const LABELS = {
+  reservoir: "물통", leak: "누수", pump: "펌프", locked: "잠김",
+  gateway_online: "게이트웨이", leak_sensors_online: "누수센서 생존",
+  today_estimated_ml: "오늘 급수 (mL)", soil_conductivity_us_cm: "전도도 (µS/cm)",
+  illuminance_lux: "조도 (lux)", sensor_seen_ago_s: "센서 수신 경과 (초)",
+};
+
+const isBad = (k, v) =>
+  (k === "leak" && v !== "none") ||
+  (k === "reservoir" && v !== "ok") ||
+  (k === "locked" && v === true) ||
+  (k === "gateway_online" && v !== true) ||
+  (k === "leak_sensors_online" && v === false);
+
+function fmt(v) {
+  if (v === null || v === undefined) return "—";
+  if (v === true) return "예";
+  if (v === false) return "아니오";
+  return v;
+}
+
+async function loadState() {
+  const res = await fetch(api("/api/state"));
+  if (!res.ok) {
+    document.getElementById("sub").textContent = "장치의 텔레메트리를 아직 받지 못했습니다";
+    return;
+  }
+  const { state: s, received_ago_s: ago } = await res.json();
+
+  document.getElementById("metrics").innerHTML = [
+    ["흙 수분", s.soil_moisture_pct, "%"],
+    ["온도", s.soil_temperature_c, "℃"],
+    ["조도", s.illuminance_lux, "lux"],
+    ["오늘 급수", s.today_estimated_ml, "mL"],
+  ].map(([label, v, unit]) => `
+    <div class="metric">
+      <div class="label">${label}</div>
+      <div class="value">${fmt(v)}<span class="unit">${v == null ? "" : unit}</span></div>
+    </div>`).join("");
+
+  document.getElementById("detail").innerHTML = Object.entries(LABELS)
+    .map(([k, label]) => {
+      const bad = isBad(k, s[k]);
+      return `<tr><th>${label}</th><td class="${bad ? "bad" : ""}">${fmt(s[k])}</td></tr>`;
+    }).join("");
+
+  // 장치가 조용해진 지 오래면 화면의 값이 과거라는 뜻입니다.
+  const stale = ago > 60;
+  document.getElementById("sub").textContent = stale
+    ? `⚠ ${ago}초째 새 값이 없습니다 — 장치가 꺼졌을 수 있습니다`
+    : `${ago}초 전 수신`;
+}
+
+async function loadChart() {
+  const res = await fetch(api(`/api/history?hours=${hours}`));
+  const samples = await res.json();
+  drawChart(samples || []);
+}
+
+function drawChart(samples) {
+  const el = document.getElementById("chart");
+  const pts = samples.filter((s) => s.m != null);
+  const waters = samples.filter((s) => s.w > 0);
+
+  if (pts.length < 2) {
+    el.innerHTML = `<div class="empty">아직 그릴 만큼 쌓이지 않았습니다</div>`;
+    return;
+  }
+
+  const W = 700, H = 220, PL = 34, PR = 8, PT = 10, PB = 22;
+  const t0 = Math.min(...samples.map((s) => s.ts));
+  const t1 = Math.max(...samples.map((s) => s.ts));
+  const span = Math.max(t1 - t0, 1);
+
+  const x = (ts) => PL + ((ts - t0) / span) * (W - PL - PR);
+  const y = (v) => PT + (1 - v / 100) * (H - PT - PB);
+
+  const line = pts.map((s, i) => `${i ? "L" : "M"}${x(s.ts).toFixed(1)},${y(s.m).toFixed(1)}`).join("");
+  const area = `${line}L${x(pts[pts.length - 1].ts).toFixed(1)},${y(0)}L${x(pts[0].ts).toFixed(1)},${y(0)}Z`;
+
+  const grid = [0, 25, 50, 75, 100].map((v) => `
+    <line x1="${PL}" y1="${y(v)}" x2="${W - PR}" y2="${y(v)}" stroke="var(--line)" stroke-width="1"/>
+    <text x="${PL - 6}" y="${y(v) + 3.5}" text-anchor="end" font-size="10" fill="var(--dim)">${v}</text>`).join("");
+
+  // 급수는 세로선으로 표시합니다. 물을 준 뒤 얼마나 올랐는지가 한눈에
+  // 보여야 급수량과 주기를 판단할 수 있습니다.
+  const marks = waters.map((s) => `
+    <line x1="${x(s.ts).toFixed(1)}" y1="${PT}" x2="${x(s.ts).toFixed(1)}" y2="${H - PB}"
+          stroke="var(--water)" stroke-width="1.5" stroke-dasharray="3 2" opacity=".8"/>`).join("");
+
+  const ticks = [0, 0.5, 1].map((f) => {
+    const ts = t0 + span * f;
+    const d = new Date(ts * 1000);
+    const label = hours <= 24
+      ? `${d.getHours()}시`
+      : `${d.getMonth() + 1}/${d.getDate()}`;
+    const anchor = f === 0 ? "start" : f === 1 ? "end" : "middle";
+    return `<text x="${x(ts).toFixed(1)}" y="${H - 6}" text-anchor="${anchor}" font-size="10" fill="var(--dim)">${label}</text>`;
+  }).join("");
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="흙 수분 추이">
+      <defs>
+        <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--accent)" stop-opacity=".22"/>
+          <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      ${grid}${marks}
+      <path d="${area}" fill="url(#g)"/>
+      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>
+      ${ticks}
+    </svg>`;
+}
+
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  hours = Number(btn.dataset.h);
+  for (const b of document.querySelectorAll("#tabs button")) {
+    b.setAttribute("aria-pressed", String(b === btn));
+  }
+  loadChart();
+});
+
+async function tick() {
+  try {
+    await Promise.all([loadState(), loadChart()]);
+  } catch (e) {
+    // 한 번 실패해도 다음 주기에 다시 시도합니다.
+  }
+}
+
+tick();
+setInterval(tick, 10000);
+</script>
+</body>
+</html>
