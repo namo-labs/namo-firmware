@@ -1,3 +1,6 @@
 target/
 .embuild/
 cfg.toml
+
+# Go 빌드 산출물
+monitor/monitor
