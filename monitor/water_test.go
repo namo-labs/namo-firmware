@@ -147,7 +147,7 @@ func TestWater는다른출처를거부(t *testing.T) {
 }
 
 func TestWater는GET을거부(t *testing.T) {
-	h := waterHandler(nil, "pilot01", newPending())
+	h := waterHandler(nil, "pilot01", newPending(), NewEventStore(t.TempDir(), 86400))
 	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/water", nil)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -170,7 +170,7 @@ func TestWater는허용되지않은급수량을거부(t *testing.T) {
 
 func postWater(t *testing.T, headers map[string]string, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := waterHandler(nil, "pilot01", newPending())
+	h := waterHandler(nil, "pilot01", newPending(), NewEventStore(t.TempDir(), 86400))
 	req := httptest.NewRequest(http.MethodPost, "http://example.test/api/water", strings.NewReader(body))
 	for k, v := range headers {
 		req.Header.Set(k, v)

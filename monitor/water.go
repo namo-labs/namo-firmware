@@ -83,7 +83,7 @@ func newID() string {
 }
 
 // waterHandler는 급수 요청을 장치로 보내고 결과를 기다립니다.
-func waterHandler(client mqtt.Client, deviceID string, p *pending) func(w http.ResponseWriter, r *http.Request) {
+func waterHandler(client mqtt.Client, deviceID string, p *pending, events *EventStore) func(w http.ResponseWriter, r *http.Request) {
 	topicCmd := "namo/pilot/" + deviceID + "/water/cmd"
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +188,15 @@ func waterHandler(client mqtt.Client, deviceID string, p *pending) func(w http.R
 
 		select {
 		case raw := <-ch:
-			writeJSON(w, http.StatusOK, json.RawMessage(raw))
+			// 거부됐다면 왜 그런지 설명할 맥락을 함께 실어 보냅니다.
+			// 화면이 "쿨다운"만 보여주면 언제 풀리는지 알 수 없습니다.
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				writeJSON(w, http.StatusOK, json.RawMessage(raw))
+				return
+			}
+			body["context"] = buildContext(events)
+			writeJSON(w, http.StatusOK, body)
 		case <-time.After(25 * time.Second):
 			// 명령은 나갔지만 결과를 못 봤습니다. 장치가 TTL로 버렸을 수도,
 			// 결과만 유실됐을 수도 있습니다. 다시 보내라고 하면 두 번
