@@ -34,6 +34,11 @@ type config struct {
 	// 분 단위로도 거의 변하지 않습니다.
 	minGapS int64
 	maxAgeS int64
+
+	// 알림. 비어 있으면 알리지 않습니다.
+	telegramToken  string
+	telegramChatID string
+	dryPct         int
 }
 
 func loadConfig() config {
@@ -44,6 +49,12 @@ func loadConfig() config {
 		addr:     env("ADDR", ":8080"),
 		minGapS:  envInt("MIN_GAP_S", 60),
 		maxAgeS:  envInt("MAX_AGE_S", 30*24*3600),
+
+		telegramToken:  env("TELOXIDE_TOKEN", ""),
+		telegramChatID: env("TELEGRAM_CHAT_ID", ""),
+		// 바질 적정이 40~60%입니다. 이 아래로 내려가면 물 줄 때가
+		// 됐다는 신호로 봅니다.
+		dryPct: int(envInt("DRY_PCT", 50)),
 	}
 }
 
@@ -119,7 +130,16 @@ func main() {
 
 	st := &state{}
 	pend := newPending()
-	client := connectMQTT(cfg, st, store, events, pend)
+
+	notifier := NewNotifier(cfg.telegramToken, cfg.telegramChatID)
+	if notifier == nil {
+		log.Print("알림 설정이 없습니다. 텔레그램으로 알리지 않습니다.")
+	} else {
+		log.Printf("알림 켜짐 (흙수분 기준 %d%%)", cfg.dryPct)
+	}
+	alerts := newAlertRules(notifier, cfg.dryPct)
+
+	client := connectMQTT(cfg, st, store, events, pend, alerts)
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
@@ -128,6 +148,17 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,
 	}
+
+	// 장치가 조용해진 것은 메시지가 오지 않는 것이라 핸들러로는 잡을 수
+	// 없습니다. 따로 시계를 보고 확인합니다.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for range t.C {
+			_, received := st.get()
+			alerts.checkQuiet(received, time.Now())
+		}
+	}()
 
 	// 주기적으로 저장합니다. 죽어도 이 주기만큼만 잃습니다.
 	ticker := time.NewTicker(5 * time.Minute)
@@ -167,7 +198,7 @@ func main() {
 	}
 }
 
-func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *pending) mqtt.Client {
+func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *pending, alerts *alertRules) mqtt.Client {
 	base := "namo/pilot/" + cfg.deviceID
 	topicTelemetry := base + "/telemetry"
 	topicResult := base + "/water/result"
@@ -188,7 +219,7 @@ func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *
 		log.Print("MQTT 접속됨")
 		for topic, handler := range map[string]mqtt.MessageHandler{
 			topicTelemetry: func(_ mqtt.Client, m mqtt.Message) {
-				handleTelemetry(m.Payload(), st, store, events, w)
+				handleTelemetry(m.Payload(), st, store, events, w, alerts)
 			},
 			topicResult: func(_ mqtt.Client, m mqtt.Message) {
 				handleWaterResult(m.Payload(), store, events, pend)
@@ -217,13 +248,19 @@ func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *
 	return client
 }
 
-func handleTelemetry(payload []byte, st *state, store *Store, events *EventStore, w *watcher) {
+func handleTelemetry(payload []byte, st *state, store *Store, events *EventStore, w *watcher, alerts *alertRules) {
 	var t telemetry
 	if err := json.Unmarshal(payload, &t); err != nil {
 		log.Printf("텔레메트리 파싱 실패: %v", err)
 		return
 	}
 	st.set(payload)
+
+	// 알릴 것이 있는지 봅니다.
+	var as alertState
+	if err := json.Unmarshal(payload, &as); err == nil {
+		alerts.check(as, time.Now())
+	}
 
 	// 상태가 바뀐 순간만 사건으로 남깁니다.
 	var sv stateView
