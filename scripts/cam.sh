@@ -18,6 +18,9 @@ PORT="${CAM_PORT:-8090}"
 FPS="${CAM_FPS:-10}"
 SIZE="${CAM_SIZE:-640x480}"
 DIR="${CAM_DIR:-/tmp/namo-cam}"
+# 640x480에 움직임이 거의 없는 화면이라 높게 잡을 이유가 없습니다.
+# 올리면 화질보다 끊김이 먼저 옵니다.
+BITRATE="${CAM_BITRATE:-500k}"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "ffmpeg이 없습니다. brew install ffmpeg" >&2
@@ -43,7 +46,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-echo "카메라 $VIDEO_DEV · 마이크 $AUDIO_DEV · ${SIZE}@${FPS}fps"
+echo "카메라 $VIDEO_DEV · 마이크 $AUDIO_DEV · ${SIZE}@${FPS}fps · ${BITRATE}"
 echo "세그먼트: $DIR"
 echo
 
@@ -65,7 +68,8 @@ ffmpeg -hide_banner -loglevel warning \
     -r "$FPS" \
     -c:v libx264 -preset veryfast -tune zerolatency \
     -pix_fmt yuv420p -profile:v baseline \
-    -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 -b:v 900k \
+    -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 \
+    -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
     -c:a aac -b:a 64k -ar 44100 -ac 1 \
     -f hls -hls_time 1 -hls_list_size 4 \
     -hls_flags delete_segments+independent_segments+omit_endlist \
