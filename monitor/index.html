@@ -77,6 +77,19 @@
   .log-what.ok .tag { border-color: var(--water); color: var(--water); }
   .log-what.no .tag { border-color: var(--warn); color: var(--warn); }
   .log-day { font-size: .72rem; color: var(--dim); padding: .6rem 0 .2rem; font-weight: 600; }
+  .cam { position: relative; background: #000; border-radius: .5rem; overflow: hidden; aspect-ratio: 4 / 3; }
+  .cam video { width: 100%; height: 100%; display: block; object-fit: contain; background: #000; }
+  .cam-msg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #999; font-size: .85rem; text-align: center; padding: 1rem; line-height: 1.6;
+  }
+  .cam-bar { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; }
+  .cam-bar button {
+    font: inherit; font-size: .78rem; padding: .3rem .7rem; cursor: pointer;
+    background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: .4rem;
+  }
+  .cam-bar button:hover { border-color: var(--accent); color: var(--accent); }
+  .cam-bar .spacer { flex: 1; }
 </style>
 </head>
 <body>
@@ -85,6 +98,20 @@
 
 <div class="card">
   <div class="grid" id="metrics"></div>
+</div>
+
+<div class="card">
+  <div class="row"><strong style="font-size:.9rem">카메라</strong></div>
+  <div class="cam">
+    <video id="cam" playsinline muted controls preload="none"></video>
+    <div class="cam-msg" id="camMsg">불러오는 중…</div>
+  </div>
+  <div class="cam-bar">
+    <button id="camToggle">재생</button>
+    <button id="camSound">소리 켜기</button>
+    <span class="spacer"></span>
+    <span class="log-time" id="camState"></span>
+  </div>
 </div>
 
 <div class="card">
@@ -132,6 +159,7 @@
 
 <footer>10초마다 갱신됩니다</footer>
 
+<script src="hls.min.js"></script>
 <script>
 // Caddy가 /namo 접두사를 붙여 넘기기도 하고, 직접 띄워 볼 때는 접두사가
 // 없기도 합니다. 지금 주소를 기준으로 API 경로를 만듭니다.
@@ -507,6 +535,109 @@ document.getElementById("doses").addEventListener("click", async (e) => {
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#doses")) disarm();
 });
+
+// ── 카메라 ─────────────────────────────────────────────────────────
+//
+// 맥에 물린 USB 웹캠을 ffmpeg이 HLS로 흘려보내고, Caddy가 /namo/cam 으로
+// 넘겨줍니다. 사파리는 HLS를 직접 재생하고, 나머지는 hls.js가 필요합니다.
+//
+// 자동으로 재생하지 않습니다. 화면을 열어두기만 해도 계속 받으면 맥과
+// 대역폭을 헛되이 쓰기 때문입니다. 볼 때만 누르는 편이 낫습니다.
+const CAM_SRC = api("/cam/stream.m3u8");
+const video = document.getElementById("cam");
+const camMsg = document.getElementById("camMsg");
+const camState = document.getElementById("camState");
+const camToggle = document.getElementById("camToggle");
+let hls = null;
+let camOn = false;
+
+function camSay(text) {
+  camMsg.textContent = text || "";
+  camMsg.style.display = text ? "flex" : "none";
+}
+
+function camStop() {
+  camOn = false;
+  if (hls) { hls.destroy(); hls = null; }
+  video.removeAttribute("src");
+  video.load();
+  camToggle.textContent = "재생";
+  camState.textContent = "";
+  camSay("멈춤 — 재생을 누르면 이어집니다");
+}
+
+async function camStart() {
+  camOn = true;
+  camToggle.textContent = "멈춤";
+  camSay("연결 중…");
+
+  // 사파리는 HLS를 네이티브로 재생합니다. hls.js를 쓰면 오히려 충돌합니다.
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = CAM_SRC;
+    try {
+      await video.play();
+      camSay("");
+      camState.textContent = "재생 중";
+    } catch (e) {
+      camSay("재생을 시작하지 못했습니다");
+    }
+    return;
+  }
+
+  if (!window.Hls || !Hls.isSupported()) {
+    camSay("이 브라우저는 HLS를 재생하지 못합니다");
+    return;
+  }
+
+  hls = new Hls({
+    // 늦게 들어와도 항상 최신 지점을 따라가게 합니다. 오래 열어두면
+    // 조금씩 밀려서 몇 분 전 화면을 보게 되는 것을 막습니다.
+    liveSyncDurationCount: 2,
+    liveMaxLatencyDurationCount: 5,
+    lowLatencyMode: true,
+    backBufferLength: 10,
+  });
+  hls.loadSource(CAM_SRC);
+  hls.attachMedia(video);
+
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    video.play().then(() => {
+      camSay("");
+      camState.textContent = "재생 중";
+    }).catch(() => camSay("재생을 누르면 시작됩니다"));
+  });
+
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    if (!data.fatal) return;
+    // 카메라 쪽이 잠깐 끊긴 것일 수 있으니 한 번은 복구를 시도합니다.
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+      camSay("스트림이 끊겼습니다 — 맥에서 cam.sh가 돌고 있는지 확인하세요");
+      camState.textContent = "끊김";
+      hls.startLoad();
+    } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      hls.recoverMediaError();
+    } else {
+      camStop();
+      camSay("재생할 수 없습니다");
+    }
+  });
+}
+
+camToggle.addEventListener("click", () => (camOn ? camStop() : camStart()));
+
+document.getElementById("camSound").addEventListener("click", (e) => {
+  video.muted = !video.muted;
+  e.target.textContent = video.muted ? "소리 켜기" : "소리 끄기";
+  // 브라우저는 사용자가 누르기 전에는 소리를 허용하지 않습니다.
+  if (!video.muted && video.paused && camOn) video.play().catch(() => {});
+});
+
+// 탭을 떠나면 받기를 멈춥니다. 맥에서 인코딩이 계속 도는 것을 줄입니다.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && camOn) camStop();
+});
+
+camSay("재생을 누르면 시작됩니다");
 
 async function tick() {
   try {
