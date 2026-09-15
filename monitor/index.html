@@ -90,6 +90,18 @@
   }
   .cam-bar button:hover { border-color: var(--accent); color: var(--accent); }
   .cam-bar .spacer { flex: 1; }
+  .live {
+    display: inline-flex; align-items: center; gap: .35rem;
+    font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+    padding: .2rem .5rem; border-radius: .3rem; border: 1px solid;
+  }
+  .live .dot { width: .4rem; height: .4rem; border-radius: 50%; background: currentColor; }
+  .live.on   { color: var(--water); border-color: var(--water); }
+  .live.on .dot { animation: pulse 2s ease-in-out infinite; }
+  .live.warn { color: #c98a2e; border-color: #c98a2e; }
+  .live.err  { color: var(--warn); border-color: var(--warn); }
+  .live.off  { color: var(--dim); border-color: var(--line); }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
 </style>
 </head>
 <body>
@@ -103,15 +115,17 @@
 <div class="card">
   <div class="row"><strong style="font-size:.9rem">카메라</strong></div>
   <div class="cam">
-    <video id="cam" playsinline muted controls preload="none"></video>
+    <video id="cam" playsinline muted preload="none"></video>
     <div class="cam-msg" id="camMsg">불러오는 중…</div>
   </div>
   <div class="cam-bar">
     <button id="camToggle">재생</button>
     <button id="camSound">소리 켜기</button>
+    <button id="camSync" hidden>최신으로</button>
     <span class="spacer"></span>
-    <span class="log-time" id="camState"></span>
+    <span class="live off" id="camLive"><span class="dot"></span>멈춤</span>
   </div>
+  <div class="hint" id="camHint"></div>
 </div>
 
 <div class="card">
@@ -546,30 +560,87 @@ document.addEventListener("click", (e) => {
 const CAM_SRC = api("/cam/stream.m3u8");
 const video = document.getElementById("cam");
 const camMsg = document.getElementById("camMsg");
-const camState = document.getElementById("camState");
+const camLive = document.getElementById("camLive");
+const camHint = document.getElementById("camHint");
 const camToggle = document.getElementById("camToggle");
+const camSync = document.getElementById("camSync");
 let hls = null;
 let camOn = false;
+let camErr = null;
 
 function camSay(text) {
   camMsg.textContent = text || "";
   camMsg.style.display = text ? "flex" : "none";
 }
 
+// 배지 하나로 지금 상태를 말합니다. 라이브 스트림에서 경과 시간은
+// 의미가 없고, 정작 알아야 할 것은 "지금 최신을 보고 있는가"입니다.
+function setLive(cls, label, hint = "") {
+  camLive.className = `live ${cls}`;
+  camLive.innerHTML = `<span class="dot"></span>${label}`;
+  camHint.textContent = hint;
+  camSync.hidden = cls !== "warn" || !camOn;
+}
+
+// 지금 화면이 최신에서 얼마나 뒤처져 있는지(초).
+// 모르면 null입니다.
+function camLatency() {
+  if (hls && typeof hls.latency === "number" && hls.latency > 0) return hls.latency;
+  try {
+    const n = video.seekable.length;
+    if (n > 0) return Math.max(0, video.seekable.end(n - 1) - video.currentTime);
+  } catch (e) { /* 아직 읽을 수 없습니다 */ }
+  return null;
+}
+
+function camJumpToLive() {
+  try {
+    const n = video.seekable.length;
+    if (n > 0) video.currentTime = video.seekable.end(n - 1) - 0.5;
+    video.play().catch(() => {});
+  } catch (e) { /* 무시 */ }
+}
+
 function camStop() {
   camOn = false;
+  camErr = null;
   if (hls) { hls.destroy(); hls = null; }
   video.removeAttribute("src");
   video.load();
   camToggle.textContent = "재생";
-  camState.textContent = "";
-  camSay("멈춤 — 재생을 누르면 이어집니다");
+  setLive("off", "멈춤");
+  camSay("재생을 누르면 시작됩니다");
 }
 
 async function camStart() {
   camOn = true;
+  camErr = null;
   camToggle.textContent = "멈춤";
   camSay("연결 중…");
+  setLive("warn", "연결 중");
+
+  // 스트림이 살아 있는지 먼저 확인합니다. 재생기가 뱉는 오류는 원인을
+  // 가리지 않아서, 카메라가 꺼진 것인지 네트워크가 끊긴 것인지를
+  // 여기서 구분해 알려줍니다.
+  try {
+    const probe = await fetch(CAM_SRC, { cache: "no-store" });
+    if (probe.status === 404) {
+      camErr = "카메라가 꺼져 있습니다";
+      setLive("err", "꺼짐", "맥에서 ./scripts/cam.sh 를 실행하세요");
+      camSay("카메라가 꺼져 있습니다");
+      camOn = false;
+      camToggle.textContent = "재생";
+      return;
+    }
+    if (!probe.ok) throw new Error(String(probe.status));
+  } catch (e) {
+    camErr = "스트림에 닿지 못했습니다";
+    setLive("err", "연결 실패", "맥이 켜져 있고 cam.sh 가 도는지 확인하세요");
+    camSay("스트림에 닿지 못했습니다");
+    camOn = false;
+    camToggle.textContent = "재생";
+    return;
+  }
 
   // 사파리는 HLS를 네이티브로 재생합니다. hls.js를 쓰면 오히려 충돌합니다.
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
@@ -577,15 +648,16 @@ async function camStart() {
     try {
       await video.play();
       camSay("");
-      camState.textContent = "재생 중";
     } catch (e) {
       camSay("재생을 시작하지 못했습니다");
+      setLive("warn", "일시정지", "화면을 눌러 재생하세요");
     }
     return;
   }
 
   if (!window.Hls || !Hls.isSupported()) {
     camSay("이 브라우저는 HLS를 재생하지 못합니다");
+    setLive("err", "미지원", "사파리나 크롬에서 열어보세요");
     return;
   }
 
@@ -603,27 +675,62 @@ async function camStart() {
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     video.play().then(() => {
       camSay("");
-      camState.textContent = "재생 중";
-    }).catch(() => camSay("재생을 누르면 시작됩니다"));
+      camErr = null;
+    }).catch(() => {
+      camSay("");
+      setLive("warn", "일시정지", "재생을 다시 눌러주세요");
+    });
   });
+
+  hls.on(Hls.Events.FRAG_LOADED, () => { camErr = null; });
 
   hls.on(Hls.Events.ERROR, (_, data) => {
     if (!data.fatal) return;
     // 카메라 쪽이 잠깐 끊긴 것일 수 있으니 한 번은 복구를 시도합니다.
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      camSay("스트림이 끊겼습니다 — 맥에서 cam.sh가 돌고 있는지 확인하세요");
-      camState.textContent = "끊김";
+      camErr = "스트림이 끊겼습니다";
+      setLive("err", "끊김", "맥에서 cam.sh 가 멈췄을 수 있습니다");
       hls.startLoad();
     } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      camErr = "영상을 복구하는 중";
+      setLive("warn", "복구 중", "잠시만 기다려주세요");
       hls.recoverMediaError();
     } else {
       camStop();
       camSay("재생할 수 없습니다");
+      setLive("err", "오류", data.details || "");
     }
   });
 }
 
 camToggle.addEventListener("click", () => (camOn ? camStop() : camStart()));
+camSync.addEventListener("click", camJumpToLive);
+
+// 화면을 눌러도 재생·정지가 되게 합니다. 기본 컨트롤을 뺐기 때문입니다.
+video.addEventListener("click", () => {
+  if (!camOn) return camStart();
+  if (video.paused) video.play().catch(() => {});
+  else video.pause();
+});
+
+// 배지를 1초마다 갱신합니다. 얼마나 뒤처졌는지는 계속 변합니다.
+setInterval(() => {
+  if (!camOn) return;
+  if (camErr) return;              // 오류 표시를 덮어쓰지 않습니다.
+  if (video.paused) {
+    setLive("warn", "일시정지", "화면을 누르면 이어집니다");
+    return;
+  }
+  const lat = camLatency();
+  if (lat === null) {
+    setLive("warn", "버퍼링");
+  } else if (lat > 12) {
+    // 오래 열어두면 조금씩 밀립니다. 따라잡을 수단을 함께 줍니다.
+    setLive("warn", `${Math.round(lat)}초 지연`, "최신으로를 누르면 따라잡습니다");
+  } else {
+    setLive("on", "LIVE", `지연 ${lat.toFixed(1)}초`);
+  }
+}, 1000);
 
 document.getElementById("camSound").addEventListener("click", (e) => {
   video.muted = !video.muted;
@@ -638,6 +745,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 camSay("재생을 누르면 시작됩니다");
+setLive("off", "멈춤");
 
 async function tick() {
   try {
