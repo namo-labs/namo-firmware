@@ -567,6 +567,21 @@ const camSync = document.getElementById("camSync");
 let hls = null;
 let camOn = false;
 let camErr = null;
+let lastPos = -1;
+let stuckFor = 0;
+
+// 끊긴 스트림에 다시 붙습니다. 카메라 쪽이 재시작하면 세그먼트 번호가
+// 건너뛰므로, 붙잡고 있던 재생기를 버리고 새로 여는 편이 빠릅니다.
+async function camRestart() {
+  if (hls) { hls.destroy(); hls = null; }
+  video.removeAttribute("src");
+  video.load();
+  lastPos = -1;
+  stuckFor = 0;
+  await camStart();
+}
+
+let retryTimer = null;
 
 function camSay(text) {
   camMsg.textContent = text || "";
@@ -604,6 +619,9 @@ function camJumpToLive() {
 function camStop() {
   camOn = false;
   camErr = null;
+  clearTimeout(retryTimer);
+  lastPos = -1;
+  stuckFor = 0;
   if (hls) { hls.destroy(); hls = null; }
   video.removeAttribute("src");
   video.load();
@@ -682,15 +700,21 @@ async function camStart() {
     });
   });
 
-  hls.on(Hls.Events.FRAG_LOADED, () => { camErr = null; });
+  hls.on(Hls.Events.FRAG_LOADED, () => {
+    camErr = null;
+    clearTimeout(retryTimer);
+  });
 
   hls.on(Hls.Events.ERROR, (_, data) => {
     if (!data.fatal) return;
     // 카메라 쪽이 잠깐 끊긴 것일 수 있으니 한 번은 복구를 시도합니다.
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
       camErr = "스트림이 끊겼습니다";
-      setLive("err", "끊김", "맥에서 cam.sh 가 멈췄을 수 있습니다");
+      setLive("err", "끊김", "다시 붙는 중입니다");
+      // 카메라가 돌아오면 저절로 이어지도록 계속 두드립니다.
       hls.startLoad();
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { if (camOn) camRestart(); }, 5000);
     } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
       camErr = "영상을 복구하는 중";
       setLive("warn", "복구 중", "잠시만 기다려주세요");
@@ -721,6 +745,24 @@ setInterval(() => {
     setLive("warn", "일시정지", "화면을 누르면 이어집니다");
     return;
   }
+  // 화면이 멈춘 채로 시간만 흐르는 경우를 잡습니다. 재생 중이라고
+  // 표시되지만 실제로는 진행하지 않는 상태입니다.
+  if (video.currentTime === lastPos) {
+    stuckFor += 1;
+    if (stuckFor === 6) {
+      setLive("warn", "복구 중", "화면이 멈춰 다시 붙는 중입니다");
+    } else if (stuckFor >= 12) {
+      // 오래 멈춰 있으면 통째로 다시 엽니다. 카메라 쪽이 재시작하면
+      // 세그먼트 번호가 건너뛰어, 붙잡고 있던 재생기는 못 따라옵니다.
+      stuckFor = 0;
+      camRestart();
+      return;
+    }
+  } else {
+    stuckFor = 0;
+    lastPos = video.currentTime;
+  }
+
   const lat = camLatency();
   if (lat === null) {
     setLive("warn", "버퍼링");
