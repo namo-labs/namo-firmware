@@ -13,10 +13,22 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+// 크롬·파이어폭스는 HLS를 기본 지원하지 않아 이 라이브러리가 필요합니다.
+// CDN 대신 함께 담아, 밖으로 나가지 않아도 재생되게 합니다.
+//
+//go:embed hls.min.js
+var hlsJS []byte
+
 func newRouter(st *state, store *Store, events *EventStore, client mqtt.Client, deviceID string, pend *pending) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/water", waterHandler(client, deviceID, pend, events))
+
+	mux.HandleFunc("/hls.min.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(hlsJS)
+	})
 
 	// 사건 목록. 무슨 일이 언제 있었는지를 봅니다.
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
