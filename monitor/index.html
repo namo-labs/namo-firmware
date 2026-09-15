@@ -145,7 +145,10 @@
 </div>
 
 <div class="card">
-  <div class="row"><strong style="font-size:.9rem">급수</strong></div>
+  <div class="row">
+    <strong style="font-size:.9rem">급수</strong>
+    <span class="live off" id="waterReady"><span class="dot"></span>확인 중</span>
+  </div>
   <div class="doses" id="doses">
     <button data-ml="50">50 mL</button>
     <button data-ml="100">100 mL</button>
@@ -182,6 +185,7 @@ const api = (p) => BASE + p;
 
 let hours = 24;
 let lastState = null;
+let lastCtx = {};
 
 const LABELS = {
   reservoir: "물통", leak: "누수", pump: "펌프", locked: "잠김",
@@ -212,6 +216,7 @@ async function loadState() {
   }
   const { state: s, received_ago_s: ago, context: ctx } = await res.json();
   lastState = s;
+  lastCtx = ctx || {};
 
   document.getElementById("metrics").innerHTML = [
     ["흙 수분", s.soil_moisture_pct, "%"],
@@ -230,6 +235,7 @@ async function loadState() {
       return `<tr><th>${label}</th><td class="${bad ? "bad" : ""}">${fmt(s[k])}</td></tr>`;
     }).join("");
 
+  renderWaterReady(s);
   renderWaterHint(s, ctx);
 
   // 장치가 조용해진 지 오래면 화면의 값이 과거라는 뜻입니다.
@@ -237,6 +243,49 @@ async function loadState() {
   document.getElementById("sub").textContent = stale
     ? `⚠ ${ago}초째 새 값이 없습니다 — 장치가 꺼졌을 수 있습니다`
     : `${ago}초 전 수신`;
+}
+
+// 지금 급수가 되는지를 장치와 같은 순서로 따져봅니다.
+//
+// 최종 판단은 언제나 장치가 합니다. 여기 판정은 미리 보여주기 위한
+// 것이고, 헛되이 눌러놓고 거부 사유를 읽는 대신 누르기 전에 알기
+// 위한 것입니다. 순서는 namo-core 의 evaluate() 를 따릅니다.
+function waterStatus(s) {
+  if (!s) return { ok: false, why: "상태를 받지 못함" };
+  if (s.locked) return { ok: false, why: "누수로 잠김" };
+  if (s.pump === "running") return { ok: false, why: "급수 중" };
+  if (s.leak === "detected") return { ok: false, why: "누수 감지됨" };
+  if (s.leak !== "none") return { ok: false, why: "누수 상태를 모름" };
+  if (s.reservoir === "empty") return { ok: false, why: "물통 비었음" };
+  if (s.reservoir !== "ok") return { ok: false, why: "물통 상태를 모름" };
+
+  const now = Math.floor(Date.now() / 1000);
+  if (s.cooldown_until && s.cooldown_until > now) {
+    return { ok: false, soon: true, why: `쿨다운 ${fmtDur(s.cooldown_until - now)}` };
+  }
+  if (typeof s.today_estimated_ml === "number" && s.today_estimated_ml >= 500) {
+    return { ok: false, why: "오늘 한도 소진" };
+  }
+  return { ok: true, why: "가능" };
+}
+
+function renderWaterReady(s) {
+  const el = document.getElementById("waterReady");
+  const st = waterStatus(s);
+
+  el.className = `live ${st.ok ? "on" : st.soon ? "warn" : "err"}`;
+  el.innerHTML = `<span class="dot"></span>${st.ok ? "가능" : st.why}`;
+
+  // 확인을 기다리는 중이 아니고 진행 중도 아닐 때만 잠급니다.
+  if (!busy && !armed) {
+    for (const b of document.querySelectorAll("#doses button")) {
+      b.disabled = !st.ok;
+      // 한도가 모자라면 그 버튼만 막습니다.
+      if (st.ok && typeof s.today_estimated_ml === "number") {
+        b.disabled = s.today_estimated_ml + Number(b.dataset.ml) > 500;
+      }
+    }
+  }
 }
 
 // 급수 카드 아래에 "지금 왜 이런 상태인지"를 씁니다.
@@ -256,10 +305,13 @@ function renderWaterHint(s, ctx = {}) {
     const via = lw.source === "web" ? " · 웹에서" : "";
     lines.push(`마지막 급수 <b>${lw.ml}mL</b> — ${fmtTime(lw.ts)} (${fmtAgo(lw.ts)})${via}`);
   }
+  // 지난 실패는 최근 것만 보여줍니다. 한참 전에 거부된 기록이 지금도
+  // 막혀 있는 것처럼 읽히면 오히려 헷갈립니다. 자세한 내역은 아래
+  // 기록 카드에 다 있습니다.
   const la = ctx.last_attempt;
-  if (la && la.status !== "completed") {
+  if (la && la.status !== "completed" && now - la.ts < 600) {
     const why = REASONS[la.reason] || la.reason || "";
-    lines.push(`마지막 시도 <b>${STATUS_LABEL[la.status] || la.status}</b> — ${why} (${fmtAgo(la.ts)})`);
+    lines.push(`직전 시도 <b>${STATUS_LABEL[la.status] || la.status}</b> — ${why} (${fmtAgo(la.ts)})`);
   }
 
   // 오늘 얼마나 남았는지. 일일 한도는 장치가 500mL로 잡고 있습니다.
@@ -739,6 +791,13 @@ video.addEventListener("click", () => {
 
 // 배지를 1초마다 갱신합니다. 얼마나 뒤처졌는지는 계속 변합니다.
 setInterval(() => {
+  // 쿨다운은 초 단위로 줄어들고, 다 되면 바로 "가능"으로 바뀌어야
+  // 합니다. 10초 주기 갱신만 기다리면 지난 뒤에도 막힌 것처럼 보입니다.
+  if (lastState) {
+    renderWaterReady(lastState);
+    renderWaterHint(lastState, lastCtx);
+  }
+
   if (!camOn) return;
   if (camErr) return;              // 오류 표시를 덮어쓰지 않습니다.
   if (video.paused) {
