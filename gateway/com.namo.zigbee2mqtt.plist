@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Zigbee2MQTT를 맥 로그인 시 자동으로 띄우고, 죽으면 다시 띄웁니다.
+
+  누수 판정이 이 게이트웨이에 걸려 있어, 꺼져 있으면 급수가 통째로
+  거부됩니다(fail-closed). 사람이 터미널을 열어두는 것에 기대면
+  맥을 재부팅할 때마다 파일럿이 멈춥니다.
+
+  설치:
+    cp gateway/com.namo.zigbee2mqtt.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.namo.zigbee2mqtt.plist
+
+  확인:  launchctl list | grep zigbee2mqtt
+  중지:  launchctl unload ~/Library/LaunchAgents/com.namo.zigbee2mqtt.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.namo.zigbee2mqtt</string>
+
+    <!-- node 는 반드시 node@24 를 씁니다. 기본 node 는 Zigbee2MQTT 가
+         지원하는 범위를 벗어나, serialport 네이티브 모듈이 어긋나면서
+         어댑터 고장과 똑같은 증상을 냅니다. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/node@24/bin/node</string>
+        <string>index.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kdh/zigbee2mqtt</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 죽으면 다시 띄웁니다. USB 대역폭이 몰려 어댑터가 끊기는 일이
+         있는데, 그때 사람이 알아채기 전에 스스로 돌아오게 합니다. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 동글이 빠진 상태처럼 계속 실패하는 경우에 쉼 없이 재시작하지
+         않도록 간격을 둡니다. -->
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kdh/zigbee2mqtt/data/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kdh/zigbee2mqtt/data/launchd.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
