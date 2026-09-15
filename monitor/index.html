@@ -115,7 +115,7 @@
 <div class="card">
   <div class="row"><strong style="font-size:.9rem">카메라</strong></div>
   <div class="cam">
-    <video id="cam" playsinline muted preload="none"></video>
+    <video id="cam" playsinline muted autoplay preload="auto"></video>
     <div class="cam-msg" id="camMsg">불러오는 중…</div>
   </div>
   <div class="cam-bar">
@@ -634,6 +634,24 @@ async function camRestart() {
 }
 
 let retryTimer = null;
+let pendingPlay = false;
+
+// 브라우저가 자동 재생을 막는 경우가 있습니다. 그때는 다음 클릭·터치
+// 한 번에 이어붙입니다. 사용자가 "재생"을 찾아 누르지 않아도 되게.
+function playSoon() {
+  if (pendingPlay) return;
+  pendingPlay = true;
+  const go = () => {
+    pendingPlay = false;
+    document.removeEventListener("click", go);
+    document.removeEventListener("touchstart", go);
+    document.removeEventListener("keydown", go);
+    if (camOn) video.play().catch(() => {});
+  };
+  document.addEventListener("click", go, { once: true });
+  document.addEventListener("touchstart", go, { once: true });
+  document.addEventListener("keydown", go, { once: true });
+}
 
 function camSay(text) {
   camMsg.textContent = text || "";
@@ -719,8 +737,10 @@ async function camStart() {
       await video.play();
       camSay("");
     } catch (e) {
-      camSay("재생을 시작하지 못했습니다");
-      setLive("warn", "일시정지", "화면을 눌러 재생하세요");
+      // 자동 재생이 막혔습니다. 화면은 띄워두고 다음 터치에 시작합니다.
+      camSay("");
+      setLive("warn", "일시정지", "화면을 한 번 누르면 시작됩니다");
+      playSoon();
     }
     return;
   }
@@ -748,7 +768,8 @@ async function camStart() {
       camErr = null;
     }).catch(() => {
       camSay("");
-      setLive("warn", "일시정지", "재생을 다시 눌러주세요");
+      setLive("warn", "일시정지", "화면을 한 번 누르면 시작됩니다");
+      playSoon();
     });
   });
 
