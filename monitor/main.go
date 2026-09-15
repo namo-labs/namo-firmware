@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -97,7 +98,9 @@ type telemetry struct {
 type waterResult struct {
 	ID          string `json:"id"`
 	Status      string `json:"status"`
+	Reason      string `json:"reason"`
 	EstimatedML int    `json:"estimated_ml"`
+	PumpMS      int    `json:"pump_ms"`
 	FinishedAt  *int64 `json:"finished_at"`
 }
 
@@ -111,15 +114,16 @@ func main() {
 	}
 
 	store := NewStore(cfg.dataDir, cfg.minGapS, cfg.maxAgeS)
-	log.Printf("이력 %d개를 불러왔습니다", store.Len())
+	events := NewEventStore(cfg.dataDir, cfg.maxAgeS)
+	log.Printf("표본 %d개, 사건 %d개를 불러왔습니다", store.Len(), events.Len())
 
 	st := &state{}
 	pend := newPending()
-	client := connectMQTT(cfg, st, store, pend)
+	client := connectMQTT(cfg, st, store, events, pend)
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: newRouter(st, store, client, cfg.deviceID, pend),
+		Handler: newRouter(st, store, events, client, cfg.deviceID, pend),
 		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,
@@ -131,7 +135,10 @@ func main() {
 	go func() {
 		for range ticker.C {
 			if err := store.Flush(); err != nil {
-				log.Printf("이력 저장 실패: %v", err)
+				log.Printf("표본 저장 실패: %v", err)
+			}
+			if err := events.Flush(); err != nil {
+				log.Printf("사건 저장 실패: %v", err)
 			}
 		}
 	}()
@@ -153,14 +160,19 @@ func main() {
 	_ = srv.Shutdown(ctx)
 	client.Disconnect(250)
 	if err := store.Flush(); err != nil {
-		log.Printf("마지막 저장 실패: %v", err)
+		log.Printf("마지막 표본 저장 실패: %v", err)
+	}
+	if err := events.Flush(); err != nil {
+		log.Printf("마지막 사건 저장 실패: %v", err)
 	}
 }
 
-func connectMQTT(cfg config, st *state, store *Store, pend *pending) mqtt.Client {
+func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *pending) mqtt.Client {
 	base := "namo/pilot/" + cfg.deviceID
 	topicTelemetry := base + "/telemetry"
 	topicResult := base + "/water/result"
+	topicStatus := base + "/status"
+	w := newWatcher()
 
 	opts := mqtt.NewClientOptions().
 		AddBroker(cfg.mqttURL).
@@ -176,10 +188,15 @@ func connectMQTT(cfg config, st *state, store *Store, pend *pending) mqtt.Client
 		log.Print("MQTT 접속됨")
 		for topic, handler := range map[string]mqtt.MessageHandler{
 			topicTelemetry: func(_ mqtt.Client, m mqtt.Message) {
-				handleTelemetry(m.Payload(), st, store)
+				handleTelemetry(m.Payload(), st, store, events, w)
 			},
 			topicResult: func(_ mqtt.Client, m mqtt.Message) {
-				handleWaterResult(m.Payload(), store, pend)
+				handleWaterResult(m.Payload(), store, events, pend)
+			},
+			// 장치가 죽으면 LWT로 offline이 옵니다. 언제 끊겼는지는
+			// 사건으로 남겨야 나중에 되짚을 수 있습니다.
+			topicStatus: func(_ mqtt.Client, m mqtt.Message) {
+				handleStatus(string(m.Payload()), events)
 			},
 		} {
 			if tok := c.Subscribe(topic, 1, handler); tok.Wait() && tok.Error() != nil {
@@ -200,13 +217,22 @@ func connectMQTT(cfg config, st *state, store *Store, pend *pending) mqtt.Client
 	return client
 }
 
-func handleTelemetry(payload []byte, st *state, store *Store) {
+func handleTelemetry(payload []byte, st *state, store *Store, events *EventStore, w *watcher) {
 	var t telemetry
 	if err := json.Unmarshal(payload, &t); err != nil {
 		log.Printf("텔레메트리 파싱 실패: %v", err)
 		return
 	}
 	st.set(payload)
+
+	// 상태가 바뀐 순간만 사건으로 남깁니다.
+	var sv stateView
+	if err := json.Unmarshal(payload, &sv); err == nil {
+		for _, e := range w.observe(sv, time.Now().Unix()) {
+			log.Printf("상태 변화: %s %s → %s", e.Kind, e.From, e.To)
+			events.Add(e)
+		}
+	}
 
 	// 장치 시각이 없으면 아직 시각 동기화 전입니다. 이력에는 담지
 	// 않습니다. 시각을 모르는 표본은 가로축에 놓을 자리가 없습니다.
@@ -222,7 +248,7 @@ func handleTelemetry(payload []byte, st *state, store *Store) {
 	})
 }
 
-func handleWaterResult(payload []byte, store *Store, pend *pending) {
+func handleWaterResult(payload []byte, store *Store, events *EventStore, pend *pending) {
 	var r waterResult
 	if err := json.Unmarshal(payload, &r); err != nil {
 		log.Printf("급수 결과 파싱 실패: %v", err)
@@ -232,10 +258,36 @@ func handleWaterResult(payload []byte, store *Store, pend *pending) {
 	if r.ID != "" {
 		pend.deliver(r.ID, append(json.RawMessage(nil), payload...))
 	}
-	// 거부되거나 중단된 급수도 물이 나갔을 수 있으므로 양으로 판단합니다.
-	if r.EstimatedML <= 0 || r.FinishedAt == nil {
+
+	ts := time.Now().Unix()
+	if r.FinishedAt != nil {
+		ts = *r.FinishedAt
+	}
+
+	// **거부와 중단도 남깁니다.** 왜 물이 안 나갔는지는 성공 기록만으로는
+	// 알 수 없고, 그걸 알아야 쿨다운인지 물통이 빈 것인지 되짚습니다.
+	src := ""
+	if strings.HasPrefix(r.ID, "web") {
+		src = "web"
+	}
+	events.Add(Event{
+		TS: ts, Kind: KindWater,
+		Status: r.Status, Reason: r.Reason,
+		ML: r.EstimatedML, PumpMS: r.PumpMS, Source: src,
+	})
+	log.Printf("급수 결과: %s %s (%dmL)", r.Status, r.Reason, r.EstimatedML)
+
+	// 그래프의 세로선은 실제로 물이 나간 것만 찍습니다.
+	if r.EstimatedML > 0 {
+		store.AddWatering(ts, r.EstimatedML)
+	}
+}
+
+func handleStatus(payload string, events *EventStore) {
+	st := strings.TrimSpace(payload)
+	if st != "online" && st != "offline" {
 		return
 	}
-	log.Printf("급수 기록: %dmL (%s)", r.EstimatedML, r.Status)
-	store.AddWatering(*r.FinishedAt, r.EstimatedML)
+	log.Printf("장치 상태: %s", st)
+	events.Add(Event{TS: time.Now().Unix(), Kind: KindDevice, To: st})
 }

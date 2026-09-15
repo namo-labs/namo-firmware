@@ -62,6 +62,21 @@
   .result { font-size: .85rem; margin-top: .7rem; min-height: 1.2rem; }
   .result.ok { color: var(--water); }
   .result.no { color: var(--warn); }
+  .hint { font-size: .78rem; color: var(--dim); margin-top: .4rem; line-height: 1.5; }
+  .log { font-size: .8rem; }
+  .log-row {
+    display: grid; grid-template-columns: 4.2rem 1fr; gap: .6rem;
+    padding: .4rem 0; border-bottom: 1px solid var(--line);
+  }
+  .log-row:last-child { border-bottom: 0; }
+  .log-time { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .log-what .tag {
+    display: inline-block; font-size: .68rem; padding: .05rem .35rem; border-radius: .25rem;
+    border: 1px solid var(--line); color: var(--dim); margin-right: .35rem; vertical-align: 1px;
+  }
+  .log-what.ok .tag { border-color: var(--water); color: var(--water); }
+  .log-what.no .tag { border-color: var(--warn); color: var(--warn); }
+  .log-day { font-size: .72rem; color: var(--dim); padding: .6rem 0 .2rem; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -96,10 +111,23 @@
     <button data-ml="200">200 mL</button>
   </div>
   <div class="result" id="result"></div>
+  <div class="hint" id="waterHint"></div>
 </div>
 
 <div class="card">
   <table id="detail"></table>
+</div>
+
+<div class="card">
+  <div class="row">
+    <strong style="font-size:.9rem">기록</strong>
+    <div class="tabs" id="logTabs">
+      <button data-n="30" aria-pressed="true">30건</button>
+      <button data-n="100" aria-pressed="false">100건</button>
+      <button data-n="500" aria-pressed="false">500건</button>
+    </div>
+  </div>
+  <div class="log" id="log"></div>
 </div>
 
 <footer>10초마다 갱신됩니다</footer>
@@ -111,6 +139,7 @@ const BASE = location.pathname.replace(/\/stats\/?$/, "").replace(/\/$/, "");
 const api = (p) => BASE + p;
 
 let hours = 24;
+let lastState = null;
 
 const LABELS = {
   reservoir: "물통", leak: "누수", pump: "펌프", locked: "잠김",
@@ -139,7 +168,8 @@ async function loadState() {
     document.getElementById("sub").textContent = "장치의 텔레메트리를 아직 받지 못했습니다";
     return;
   }
-  const { state: s, received_ago_s: ago } = await res.json();
+  const { state: s, received_ago_s: ago, context: ctx } = await res.json();
+  lastState = s;
 
   document.getElementById("metrics").innerHTML = [
     ["흙 수분", s.soil_moisture_pct, "%"],
@@ -158,12 +188,120 @@ async function loadState() {
       return `<tr><th>${label}</th><td class="${bad ? "bad" : ""}">${fmt(s[k])}</td></tr>`;
     }).join("");
 
+  renderWaterHint(s, ctx);
+
   // 장치가 조용해진 지 오래면 화면의 값이 과거라는 뜻입니다.
   const stale = ago > 60;
   document.getElementById("sub").textContent = stale
     ? `⚠ ${ago}초째 새 값이 없습니다 — 장치가 꺼졌을 수 있습니다`
     : `${ago}초 전 수신`;
 }
+
+// 급수 카드 아래에 "지금 왜 이런 상태인지"를 씁니다.
+//
+// 쿨다운이면 언제 풀리는지, 직전에 언제 얼마나 줬는지까지 보여야
+// 기다릴지 말지 판단할 수 있습니다.
+function renderWaterHint(s, ctx = {}) {
+  const el = document.getElementById("waterHint");
+  const lines = [];
+  const now = Math.floor(Date.now() / 1000);
+
+  if (s.cooldown_until && s.cooldown_until > now) {
+    lines.push(`🕒 쿨다운 <b>${fmtDur(s.cooldown_until - now)}</b> 남음 (${fmtTime(s.cooldown_until)}에 풀림)`);
+  }
+  const lw = ctx.last_watering;
+  if (lw) {
+    const via = lw.source === "web" ? " · 웹에서" : "";
+    lines.push(`마지막 급수 <b>${lw.ml}mL</b> — ${fmtTime(lw.ts)} (${fmtAgo(lw.ts)})${via}`);
+  }
+  const la = ctx.last_attempt;
+  if (la && la.status !== "completed") {
+    const why = REASONS[la.reason] || la.reason || "";
+    lines.push(`마지막 시도 <b>${STATUS_LABEL[la.status] || la.status}</b> — ${why} (${fmtAgo(la.ts)})`);
+  }
+
+  // 오늘 얼마나 남았는지. 일일 한도는 장치가 500mL로 잡고 있습니다.
+  if (typeof s.today_estimated_ml === "number") {
+    lines.push(`오늘 ${s.today_estimated_ml}mL / 500mL · 남은 한도 <b>${Math.max(0, 500 - s.today_estimated_ml)}mL</b>`);
+  }
+
+  if (s.reservoir !== "ok" && ctx.reservoir_empty_since) {
+    lines.push(`⚠ 물통이 ${fmtAgo(ctx.reservoir_empty_since)}부터 비어 있습니다`);
+  }
+  if (s.locked && ctx.locked_since) {
+    lines.push(`🔒 ${fmtAgo(ctx.locked_since)}부터 잠김 — unlock 명령으로만 풀립니다`);
+  }
+  if (s.gateway_online === false && ctx.gateway_lost_at) {
+    lines.push(`⚠ 게이트웨이가 ${fmtAgo(ctx.gateway_lost_at)}부터 끊겨 급수가 거부됩니다`);
+  }
+
+  el.innerHTML = lines.join("<br>");
+}
+
+// 사건 한 줄을 사람 말로 바꿉니다.
+function describe(e) {
+  const v = (x) => VALUE_LABEL[x] ?? x;
+
+  if (e.k === "water") {
+    const tag = STATUS_LABEL[e.status] || e.status;
+    if (e.status === "completed") {
+      return { cls: "ok", tag, text: `${e.ml}mL${e.pms ? ` · ${(e.pms / 1000).toFixed(1)}초` : ""}${e.src === "web" ? " · 웹" : ""}` };
+    }
+    const why = REASONS[e.r] || e.r || "";
+    const extra = e.ml ? ` (${e.ml}mL 나감)` : "";
+    return { cls: "no", tag, text: `${why}${extra}` };
+  }
+  if (e.k === "gateway" && String(e.f).startsWith("sensors:")) {
+    const to = String(e.t).replace("sensors:", "");
+    return { cls: to === "true" ? "ok" : "no", tag: "누수센서", text: to === "true" ? "살아남" : "응답 없음" };
+  }
+
+  const label = KIND_LABEL[e.k] || e.k;
+  const to = v(e.t);
+  const bad =
+    (e.k === "reservoir" && e.t !== "ok") ||
+    (e.k === "leak" && e.t !== "none") ||
+    (e.k === "lock" && e.t === "true") ||
+    (e.k === "gateway" && e.t === "false") ||
+    (e.k === "device" && e.t === "offline");
+  const from = e.f ? `${v(e.f)} → ` : "";
+  return { cls: bad ? "no" : "ok", tag: label, text: `${from}${to}` };
+}
+
+let logLimit = 30;
+
+async function loadLog() {
+  const res = await fetch(api(`/api/events?limit=${logLimit}`));
+  const events = (await res.json()) || [];
+  const el = document.getElementById("log");
+
+  if (!events.length) {
+    el.innerHTML = `<div class="empty">아직 기록이 없습니다</div>`;
+    return;
+  }
+
+  let day = null;
+  el.innerHTML = events.map((e) => {
+    const d = describe(e);
+    const thisDay = fmtDay(e.ts);
+    const header = thisDay !== day ? `<div class="log-day">${thisDay}</div>` : "";
+    day = thisDay;
+    return `${header}<div class="log-row">
+      <div class="log-time">${fmtTime(e.ts)}</div>
+      <div class="log-what ${d.cls}"><span class="tag">${d.tag}</span>${d.text}</div>
+    </div>`;
+  }).join("");
+}
+
+document.getElementById("logTabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  logLimit = Number(btn.dataset.n);
+  for (const b of document.querySelectorAll("#logTabs button")) {
+    b.setAttribute("aria-pressed", String(b === btn));
+  }
+  loadLog();
+});
 
 async function loadChart() {
   const res = await fetch(api(`/api/history?hours=${hours}`));
@@ -253,6 +391,48 @@ const REASONS = {
   clock_unsynced: "장치 시각이 맞춰지지 않았습니다",
 };
 
+// 사람이 읽을 수 있게 바꾸는 표들.
+const KIND_LABEL = {
+  water: "급수", reservoir: "물통", leak: "누수",
+  lock: "잠금", gateway: "게이트웨이", device: "장치",
+};
+const STATUS_LABEL = { completed: "완료", rejected: "거부", aborted: "중단" };
+const VALUE_LABEL = {
+  ok: "정상", empty: "비었음", unknown: "모름",
+  none: "없음", detected: "감지됨",
+  true: "예", false: "아니오",
+  online: "연결됨", offline: "끊김",
+};
+
+const fmtTime = (ts) => {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+const fmtDay = (ts) => {
+  const d = new Date(ts * 1000);
+  const today = new Date();
+  const same = d.toDateString() === today.toDateString();
+  const yday = new Date(today.getTime() - 86400000).toDateString() === d.toDateString();
+  if (same) return "오늘";
+  if (yday) return "어제";
+  return `${d.getMonth() + 1}월 ${d.getDate()}일`;
+};
+// "3분 전", "2시간 전"처럼 지금으로부터 얼마나 됐는지.
+const fmtAgo = (ts) => {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (s < 60) return `${s}초 전`;
+  if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+  if (s < 86400) return `${Math.floor(s / 3600)}시간 ${Math.floor((s % 3600) / 60)}분 전`;
+  return `${Math.floor(s / 86400)}일 전`;
+};
+const fmtDur = (s) => {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s}초`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}분 ${s % 60}초`;
+  return `${Math.floor(m / 60)}시간 ${m % 60}분`;
+};
+
 const resultEl = document.getElementById("result");
 let armed = null;   // 확인을 기다리는 버튼
 let busy = false;
@@ -310,6 +490,8 @@ document.getElementById("doses").addEventListener("click", async (e) => {
     } else {
       resultEl.className = "result no";
       resultEl.textContent = REASONS[data.reason] || data.reason || "거부됐습니다";
+      // 거부된 이유의 배경을 바로 아래에 펼칩니다.
+      if (data.context) renderWaterHint(lastState || {}, data.context);
     }
   } catch (err) {
     resultEl.className = "result no";
@@ -328,7 +510,7 @@ document.addEventListener("click", (e) => {
 
 async function tick() {
   try {
-    await Promise.all([loadState(), loadChart()]);
+    await Promise.all([loadState(), loadChart(), loadLog()]);
   } catch (e) {
     // 한 번 실패해도 다음 주기에 다시 시도합니다.
   }

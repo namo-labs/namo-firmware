@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -112,11 +111,7 @@ func (s *Store) Flush() error {
 		return err
 	}
 
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := saveJSON(s.path, data); err != nil {
 		return err
 	}
 
@@ -127,15 +122,7 @@ func (s *Store) Flush() error {
 }
 
 func (s *Store) load() {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		return // 첫 기동이면 파일이 없습니다.
-	}
-	var samples []Sample
-	if err := json.Unmarshal(data, &samples); err != nil {
-		return // 깨진 파일은 버리고 새로 시작합니다.
-	}
-	s.samples = samples
+	loadJSON(s.path, &s.samples)
 }
 
 func (s *Store) Len() int {
