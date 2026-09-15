@@ -12,8 +12,10 @@
 
 set -uo pipefail
 
-VIDEO_DEV="${CAM_VIDEO:-0}"
-AUDIO_DEV="${CAM_AUDIO:-1}"
+# 장치는 **이름으로** 지정합니다. 번호는 아이폰이 붙었다 떨어질 때마다
+# 밀려서, 어제 되던 명령이 오늘 "Invalid audio device index"로 죽습니다.
+VIDEO_DEV="${CAM_VIDEO:-USB2.0 PC CAMERA}"
+AUDIO_DEV="${CAM_AUDIO:-USB2.0 MIC}"
 PORT="${CAM_PORT:-8090}"
 FPS="${CAM_FPS:-10}"
 SIZE="${CAM_SIZE:-640x480}"
@@ -90,6 +92,20 @@ since_update() {
     mtime=$(stat -f %m "$DIR/stream.m3u8" 2>/dev/null) || { echo 9999; return; }
     echo $(( $(date +%s) - mtime ))
 }
+
+# 이름이 실제로 있는지 먼저 봅니다. 없는 채로 들어가면 ffmpeg이
+# 알아보기 어려운 오류를 내고 죽습니다.
+DEVICES="$(ffmpeg -f avfoundation -list_devices true -i "" 2>&1)"
+for d in "$VIDEO_DEV" "$AUDIO_DEV"; do
+    if ! grep -qF "$d" <<<"$DEVICES"; then
+        echo "장치를 찾지 못했습니다: $d" >&2
+        echo >&2
+        echo "$DEVICES" | grep -E '^\[AVFoundation.*\] (\[|AVFoundation)' >&2
+        echo >&2
+        echo "CAM_VIDEO / CAM_AUDIO 로 이름을 지정할 수 있습니다." >&2
+        exit 1
+    fi
+done
 
 echo "카메라 $VIDEO_DEV · 마이크 $AUDIO_DEV · ${SIZE}@${FPS}fps · ${BITRATE}"
 echo "세그먼트: $DIR"
