@@ -69,6 +69,11 @@ start_ffmpeg() {
     # maxrate와 bufsize로 상한을 겁니다. -b:v만 주면 목표치일 뿐이라
     # 화면이 바뀌는 순간 실제 비트레이트가 튀고, 그때 세그먼트가 커져
     # 재생이 끊깁니다.
+    #
+    # HLS와 함께 5초마다 JPEG 한 장을 덮어씁니다. 앱 목록이나 알림에
+    # 붙일 그림은 플레이어가 필요 없는 편이 낫습니다. 이미 디코딩한
+    # 프레임을 쓰므로 부담이 거의 없습니다. atomic_writing 을 켜야
+    # 쓰는 도중에 읽어 깨진 그림이 나가지 않습니다.
     ffmpeg -hide_banner -loglevel warning \
         -f avfoundation -pixel_format uyvy422 \
         -framerate "$FPS" -video_size "$SIZE" \
@@ -82,7 +87,9 @@ start_ffmpeg() {
         -f hls -hls_time 1 -hls_list_size 4 \
         -hls_flags delete_segments+independent_segments+omit_endlist \
         -hls_segment_filename "$DIR/seg%05d.ts" \
-        "$DIR/stream.m3u8" &
+        "$DIR/stream.m3u8" \
+        -map 0:v -vf fps=1/5 -update 1 -q:v 4 -atomic_writing 1 \
+        "$DIR/snapshot.jpg" &
     FF_PID=$!
 }
 
@@ -132,6 +139,7 @@ fi
 
 echo "[$(stamp)] 스트리밍 시작됨"
 echo "  로컬 확인:  http://localhost:${PORT}/stream.m3u8"
+echo "  스냅샷:     http://localhost:${PORT}/snapshot.jpg"
 echo "  멈추려면 Ctrl+C"
 echo
 

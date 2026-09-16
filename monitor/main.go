@@ -152,7 +152,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: newRouter(st, store, events, client, cfg.deviceID, cfg.apiToken, pend),
+		Handler: newRouter(cfg, st, store, events, client, pend),
 		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,

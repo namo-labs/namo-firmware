@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -95,41 +94,7 @@ func waterHandler(client mqtt.Client, deviceID string, p *pending, events *Event
 			return
 		}
 
-		// Content-Type을 강제합니다. HTML form은 이 값을 만들 수 없어,
-		// 남의 페이지에 숨긴 폼으로 급수를 거는 길이 막힙니다.
-		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-			writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{
-				"error": "application/json으로 보내야 합니다",
-			})
-			return
-		}
-
-		// 출처를 확인합니다. 브라우저는 교차 출처 요청에 Origin을 붙이고,
-		// 최근 브라우저는 Sec-Fetch-Site도 함께 보냅니다. **둘 다 없으면
-		// 거부합니다.** 판단할 근거가 없을 때 허용하는 쪽으로 기울면,
-		// 헤더를 가리는 것만으로 검사를 지나칠 수 있습니다. 장치 쪽
-		// 안전규칙과 같은 방향(fail-closed)으로 맞춥니다.
-		origin := r.Header.Get("Origin")
-		site := r.Header.Get("Sec-Fetch-Site")
-		switch {
-		case origin != "":
-			if !sameOrigin(origin, r.Host) {
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"error": "다른 출처에서 온 요청입니다",
-				})
-				return
-			}
-		case site != "":
-			if site != "same-origin" && site != "none" {
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"error": "다른 출처에서 온 요청입니다",
-				})
-				return
-			}
-		default:
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": "출처를 확인할 수 없습니다",
-			})
+		if err := guardWrite(w, r); err != nil {
 			return
 		}
 
