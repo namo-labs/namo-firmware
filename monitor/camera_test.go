@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,14 +14,43 @@ import (
 // 두어, 스트림 서버의 시계가 이 서비스와 어긋난 상황을 만들 수 있습니다.
 func camServer(t *testing.T, lastMod, serverNow time.Time, code int) *httptest.Server {
 	t.Helper()
+	return camServerSeq(t, lastMod, serverNow, code, nil)
+}
+
+// playlist는 주어진 시퀀스 번호를 단 플레이리스트를 만듭니다.
+func playlist(seq int) string {
+	return "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:1\n" +
+		"#EXT-X-MEDIA-SEQUENCE:" + strconv.Itoa(seq) + "\n" +
+		"#EXTINF:1.000000,\nseg00001.ts\n"
+}
+
+// camServerSeq는 요청마다 다음 응답을 내놓습니다. nil이면 본문이 없는
+// 예전 방식(헤더만) 서버가 됩니다.
+type camResp struct {
+	seq     int
+	lastMod time.Time
+	now     time.Time
+}
+
+func camServerSeq(t *testing.T, lastMod, serverNow time.Time, code int, seq []camResp) *httptest.Server {
+	t.Helper()
+	var i int
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !lastMod.IsZero() {
-			w.Header().Set("Last-Modified", lastMod.UTC().Format(http.TimeFormat))
+		lm, now := lastMod, serverNow
+		body := ""
+		if seq != nil {
+			c := seq[min(i, len(seq)-1)]
+			i++
+			lm, now, body = c.lastMod, c.now, playlist(c.seq)
 		}
-		if !serverNow.IsZero() {
-			w.Header().Set("Date", serverNow.UTC().Format(http.TimeFormat))
+		if !lm.IsZero() {
+			w.Header().Set("Last-Modified", lm.UTC().Format(http.TimeFormat))
+		}
+		if !now.IsZero() {
+			w.Header().Set("Date", now.UTC().Format(http.TimeFormat))
 		}
 		w.WriteHeader(code)
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(s.Close)
 	return s
@@ -172,5 +203,80 @@ func TestCameraUnknown으로는알리지않는다(t *testing.T) {
 
 	if len(f.sent) != 0 {
 		t.Fatalf("unknown으로 알렸습니다: %v", f.sent)
+	}
+}
+
+// ── 세그먼트 번호 ──────────────────────────────────────────────────
+
+// 이 테스트가 두 번째 교훈입니다.
+//
+// ffmpeg은 종료할 때도 플레이리스트를 다시 씁니다. 그래서 감시
+// 스크립트가 10초마다 재시작을 반복하는 동안 파일은 계속 방금 쓰인
+// 것처럼 보입니다. 프레임은 한 장도 안 나오는데 말입니다.
+func TestCamera파일만새것이고프레임은안나오면stalled(t *testing.T) {
+	base := time.Now()
+	var resps []camResp
+	// 10초마다 재시작 — 파일은 매번 새로 쓰이지만 번호는 제자리.
+	for i := 0; i < 6; i++ {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		resps = append(resps, camResp{seq: 1541, lastMod: at, now: at})
+	}
+	s := camServerSeq(t, time.Time{}, time.Time{}, http.StatusOK, resps)
+
+	c := newCameraProbe(s.URL, 25*time.Second)
+	for i := 0; i < 5; i++ {
+		c.probe(context.Background())
+	}
+
+	got := c.get()
+	if got.Status != camStalled {
+		t.Fatalf("status = %q, 기대 stalled — 파일이 새것이라고 속았습니다", got.Status)
+	}
+	if got.AgeS == nil || *got.AgeS < 20 {
+		t.Fatalf("age_s = %v, 20초 넘게 나와야 합니다", got.AgeS)
+	}
+}
+
+func TestCamera번호가늘면live(t *testing.T) {
+	base := time.Now()
+	var resps []camResp
+	for i := 0; i < 6; i++ {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		resps = append(resps, camResp{seq: 1541 + i*10, lastMod: at, now: at})
+	}
+	s := camServerSeq(t, time.Time{}, time.Time{}, http.StatusOK, resps)
+
+	c := newCameraProbe(s.URL, 25*time.Second)
+	for i := 0; i < 4; i++ {
+		c.probe(context.Background())
+	}
+
+	if got := c.get(); got.Status != camLive {
+		t.Fatalf("status = %q, 기대 live", got.Status)
+	}
+}
+
+// 번호는 그대로인데 파일마저 늙으면, 둘 중 더 나쁜 쪽이 답입니다.
+func TestCamera둘다늙으면더나쁜쪽을쓴다(t *testing.T) {
+	now := time.Now()
+	resps := []camResp{{seq: 1541, lastMod: now.Add(-6 * time.Hour), now: now}}
+	s := camServerSeq(t, time.Time{}, time.Time{}, http.StatusOK, resps)
+
+	got := probeOnce(t, s.URL, 25*time.Second)
+	if got.Status != camStalled {
+		t.Fatalf("status = %q, 기대 stalled", got.Status)
+	}
+	if got.AgeS == nil || *got.AgeS < 6*3600-5 {
+		t.Fatalf("age_s = %v, 여섯 시간쯤이어야 합니다", got.AgeS)
+	}
+}
+
+func Test미디어시퀀스를읽는다(t *testing.T) {
+	seq, err := mediaSequence(strings.NewReader(playlist(1541)))
+	if err != nil || seq != "1541" {
+		t.Fatalf("seq = %q, err = %v", seq, err)
+	}
+	if _, err := mediaSequence(strings.NewReader("#EXTM3U\n")); err == nil {
+		t.Fatal("번호가 없는데 읽었다고 합니다")
 	}
 }
