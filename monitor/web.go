@@ -19,10 +19,13 @@ var indexHTML []byte
 //go:embed hls.min.js
 var hlsJS []byte
 
-func newRouter(st *state, store *Store, events *EventStore, client mqtt.Client, deviceID, apiToken string, pend *pending) http.Handler {
+func newRouter(cfg config, st *state, store *Store, events *EventStore, client mqtt.Client, pend *pending) http.Handler {
+	deviceID, apiToken := cfg.deviceID, cfg.apiToken
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/water", waterHandler(client, deviceID, pend, events))
+	mux.HandleFunc("/api/unlock", unlockHandler(client, deviceID, st))
+	mux.HandleFunc("/api/config", configHandler(cfg))
 
 	mux.HandleFunc("/hls.min.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")

@@ -156,6 +156,9 @@
   </div>
   <div class="result" id="result"></div>
   <div class="hint" id="waterHint"></div>
+  <div class="doses" id="unlockRow" hidden style="margin-top:.7rem">
+    <button id="unlockBtn">잠금 해제</button>
+  </div>
 </div>
 
 <div class="card">
@@ -186,6 +189,21 @@ const api = (p) => BASE + p;
 let hours = 24;
 let lastState = null;
 let lastCtx = {};
+
+// 장치가 강제하는 한도. /api/config 에서 받아옵니다. 화면에 숫자를
+// 박아두면 장치 쪽을 고쳤을 때 화면이 거짓말을 하게 됩니다.
+let limits = { daily_limit_ml: 500, max_dose_ml: 300, cooldown_s: 1800 };
+
+async function loadConfig() {
+  try {
+    const cfg = await (await fetch(api("/api/config"))).json();
+    if (cfg.limits) limits = cfg.limits;
+    if (Array.isArray(cfg.allowed_doses) && cfg.allowed_doses.length) {
+      document.getElementById("doses").innerHTML = cfg.allowed_doses
+        .map((ml) => `<button data-ml="${ml}">${ml} mL</button>`).join("");
+    }
+  } catch (e) { /* 기본값으로 갑니다 */ }
+}
 
 const LABELS = {
   reservoir: "물통", leak: "누수", pump: "펌프", locked: "잠김",
@@ -263,7 +281,7 @@ function waterStatus(s) {
   if (s.cooldown_until && s.cooldown_until > now) {
     return { ok: false, soon: true, why: `쿨다운 ${fmtDur(s.cooldown_until - now)}` };
   }
-  if (typeof s.today_estimated_ml === "number" && s.today_estimated_ml >= 500) {
+  if (typeof s.today_estimated_ml === "number" && s.today_estimated_ml >= limits.daily_limit_ml) {
     return { ok: false, why: "오늘 한도 소진" };
   }
   return { ok: true, why: "가능" };
@@ -276,13 +294,16 @@ function renderWaterReady(s) {
   el.className = `live ${st.ok ? "on" : st.soon ? "warn" : "err"}`;
   el.innerHTML = `<span class="dot"></span>${st.ok ? "가능" : st.why}`;
 
+  // 잠겼을 때만 해제 버튼을 보여줍니다. 평소에 눌릴 일이 없어야 합니다.
+  document.getElementById("unlockRow").hidden = !s.locked;
+
   // 확인을 기다리는 중이 아니고 진행 중도 아닐 때만 잠급니다.
   if (!busy && !armed) {
     for (const b of document.querySelectorAll("#doses button")) {
       b.disabled = !st.ok;
       // 한도가 모자라면 그 버튼만 막습니다.
       if (st.ok && typeof s.today_estimated_ml === "number") {
-        b.disabled = s.today_estimated_ml + Number(b.dataset.ml) > 500;
+        b.disabled = s.today_estimated_ml + Number(b.dataset.ml) > limits.daily_limit_ml;
       }
     }
   }
@@ -314,9 +335,9 @@ function renderWaterHint(s, ctx = {}) {
     lines.push(`직전 시도 <b>${STATUS_LABEL[la.status] || la.status}</b> — ${why} (${fmtAgo(la.ts)})`);
   }
 
-  // 오늘 얼마나 남았는지. 일일 한도는 장치가 500mL로 잡고 있습니다.
+  // 오늘 얼마나 남았는지. 한도는 /api/config 에서 받아옵니다.
   if (typeof s.today_estimated_ml === "number") {
-    lines.push(`오늘 ${s.today_estimated_ml}mL / 500mL · 남은 한도 <b>${Math.max(0, 500 - s.today_estimated_ml)}mL</b>`);
+    lines.push(`오늘 ${s.today_estimated_ml}mL / ${limits.daily_limit_ml}mL · 남은 한도 <b>${Math.max(0, limits.daily_limit_ml - s.today_estimated_ml)}mL</b>`);
   }
 
   if (s.reservoir !== "ok" && ctx.reservoir_empty_since) {
@@ -541,6 +562,61 @@ function disarm() {
   armed.textContent = armed.dataset.ml + " mL";
   armed = null;
 }
+
+// 잠금은 누수를 본 뒤에만 걸립니다. 원인을 확인하지 않고 푸는 것은
+// 물이 새는 채로 급수를 다시 여는 것과 같아서, 한 번 더 묻습니다.
+const unlockBtn = document.getElementById("unlockBtn");
+let unlockArmed = false;
+
+unlockBtn.addEventListener("click", async () => {
+  if (!unlockArmed) {
+    unlockArmed = true;
+    unlockBtn.classList.add("confirm");
+    unlockBtn.textContent = "누수 원인 확인했음?";
+    resultEl.className = "result";
+    resultEl.textContent = "한 번 더 누르면 잠금이 풀립니다";
+    return;
+  }
+
+  unlockArmed = false;
+  unlockBtn.classList.remove("confirm");
+  unlockBtn.textContent = "해제 중…";
+  unlockBtn.disabled = true;
+  resultEl.className = "result";
+  resultEl.textContent = "";
+
+  try {
+    const res = await fetch(api("/api/unlock"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await res.json();
+    if (res.ok && data.locked === false) {
+      resultEl.className = "result ok";
+      resultEl.textContent = data.note || "잠금이 풀렸습니다";
+    } else {
+      resultEl.className = "result no";
+      resultEl.textContent = data.error || "풀지 못했습니다";
+    }
+  } catch (e) {
+    resultEl.className = "result no";
+    resultEl.textContent = "요청을 보내지 못했습니다";
+  } finally {
+    unlockBtn.disabled = false;
+    unlockBtn.textContent = "잠금 해제";
+    tick();
+  }
+});
+
+// 다른 곳을 누르면 확인 상태를 풉니다.
+document.addEventListener("click", (e) => {
+  if (unlockArmed && !e.target.closest("#unlockRow")) {
+    unlockArmed = false;
+    unlockBtn.classList.remove("confirm");
+    unlockBtn.textContent = "잠금 해제";
+  }
+});
 
 document.getElementById("doses").addEventListener("click", async (e) => {
   const btn = e.target.closest("button");
@@ -879,6 +955,9 @@ document.addEventListener("visibilitychange", () => {
 setLive("off", "멈춤");
 camSay("연결 중…");
 camStart();
+
+// 한도와 버튼 구성을 받아온 뒤 첫 화면을 그립니다.
+loadConfig().then(tick);
 
 async function tick() {
   try {
