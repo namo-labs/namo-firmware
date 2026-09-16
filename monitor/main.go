@@ -39,6 +39,9 @@ type config struct {
 	telegramToken  string
 	telegramChatID string
 	dryPct         int
+
+	// 앱이 쓸 Bearer 토큰. 비어 있으면 Bearer 요청을 거부합니다.
+	apiToken string
 }
 
 func loadConfig() config {
@@ -55,6 +58,8 @@ func loadConfig() config {
 		// 바질 적정이 40~60%입니다. 이 아래로 내려가면 물 줄 때가
 		// 됐다는 신호로 봅니다.
 		dryPct: int(envInt("DRY_PCT", 50)),
+
+		apiToken: env("API_TOKEN", ""),
 	}
 }
 
@@ -139,11 +144,15 @@ func main() {
 	}
 	alerts := newAlertRules(notifier, cfg.dryPct)
 
+	if cfg.apiToken == "" {
+		log.Print("API_TOKEN이 없습니다. Bearer 토큰 요청은 모두 거부됩니다.")
+	}
+
 	client := connectMQTT(cfg, st, store, events, pend, alerts)
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: newRouter(st, store, events, client, cfg.deviceID, pend),
+		Handler: newRouter(st, store, events, client, cfg.deviceID, cfg.apiToken, pend),
 		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,
