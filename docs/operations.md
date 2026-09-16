@@ -38,11 +38,33 @@
 | 경로 | 내용 |
 |---|---|
 | `/namo/stats` | 화면 |
-| `/namo/api/state` | 현재 상태 + 맥락 |
-| `/namo/api/history?hours=N` | 센서 이력 |
-| `/namo/api/events?limit=N` | 사건 기록 |
-| `/namo/api/water` | 급수 (POST) |
-| `/namo/cam/stream.m3u8` | 카메라 HLS |
+| `GET /namo/api/config` | 한도·급수량 목록·알림 기준 |
+| `GET /namo/api/state` | 현재 상태 + 맥락 |
+| `GET /namo/api/history?hours=N` | 센서 이력 (최대 30일) |
+| `GET /namo/api/events?limit=N` | 사건 기록 |
+| `POST /namo/api/water` | 급수 `{"dose_ml":100}` |
+| `POST /namo/api/unlock` | 잠금 해제 `{}` |
+| `GET /namo/cam/stream.m3u8` | 카메라 HLS |
+| `GET /namo/cam/snapshot.jpg` | 현재 프레임 (5초 갱신) |
+
+### 인증
+
+두 갈래입니다. 쓰는 쪽이 다르기 때문입니다.
+
+- **사람(브라우저)** — Basic Auth. 한 번 저장해두면 계속 씁니다.
+- **앱** — `Authorization: Bearer <토큰>`. Basic Auth 자격증명을 앱에
+  심으면 계정 단위라 기기별로 끊거나 돌릴 수 없습니다.
+
+토큰은 Caddy에서 값까지 맞춰봅니다. 카메라는 맥에서 도는 서버로 바로 가
+`namo-monitor`를 거치지 않으므로, "Bearer가 붙어 있으면 통과"로 두면 아무
+값이나 카메라를 볼 수 있습니다.
+
+상태를 바꾸는 요청(`water`·`unlock`)은 `Content-Type: application/json`이
+필요합니다. HTML form은 그 값을 만들 수 없어, 남의 페이지에 숨긴 폼으로
+급수를 거는 길이 막힙니다.
+
+**한도는 화면에 박아두지 않습니다.** `/api/config`에서 받아 씁니다. 장치
+쪽 값을 고치면 `monitor/config_api.go`의 상수도 함께 고칩니다.
 
 ## 2. 죽었을 때
 
