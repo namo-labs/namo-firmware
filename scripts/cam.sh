@@ -47,13 +47,40 @@ cleanup() {
     RUNNING=0
     echo
     echo "정리 중..."
-    kill "$FF_PID" "$SRV_PID" 2>/dev/null
+    stop_ffmpeg
+    kill "$SRV_PID" 2>/dev/null
     wait 2>/dev/null
     exit 0
 }
 trap cleanup INT TERM
 
 stamp() { date '+%H:%M:%S'; }
+
+# ffmpeg을 확실히 내립니다.
+#
+# **여기에 wait만 쓰면 안 됩니다.** avfoundation 입력에서 막힌 ffmpeg은
+# SIGTERM을 처리할 기회조차 없어 그대로 남고, wait은 영원히 돌아오지
+# 않습니다. 그러면 되살리라고 만든 감시 루프가 첫 재시작에서 멈춰버려,
+# 카메라가 죽은 채로 몇 시간이 지납니다. 실제로 6시간을 그랬습니다.
+stop_ffmpeg() {
+    [ -n "$FF_PID" ] || return 0
+    kill "$FF_PID" 2>/dev/null
+
+    local i
+    for i in 1 2 3 4 5; do
+        kill -0 "$FF_PID" 2>/dev/null || break
+        sleep 1
+    done
+
+    if kill -0 "$FF_PID" 2>/dev/null; then
+        echo "[$(stamp)] ffmpeg이 SIGTERM에 응하지 않아 강제로 내립니다"
+        kill -9 "$FF_PID" 2>/dev/null
+    fi
+    # 여기서는 이미 죽은 뒤라 곧바로 돌아옵니다. 좀비를 거두기 위한
+    # 것입니다.
+    wait "$FF_PID" 2>/dev/null
+    FF_PID=""
+}
 
 start_ffmpeg() {
     # HLS 세그먼트를 만듭니다.
@@ -149,12 +176,15 @@ echo
 # 상태로 얼어붙는 일이 있습니다. 프로세스 생사만 봐서는 못 잡으므로,
 # **세그먼트가 실제로 갱신되는지**를 봅니다.
 restarts=0
+# 재시작하고도 프레임이 돌아오지 않은 횟수.
+failed=0
 while [ "$RUNNING" = 1 ]; do
     sleep 2
 
     if ! kill -0 "$FF_PID" 2>/dev/null; then
         restarts=$((restarts + 1))
         echo "[$(stamp)] ffmpeg이 종료됨 — 다시 시작합니다 (${restarts}회)"
+        wait "$FF_PID" 2>/dev/null
         start_ffmpeg
         sleep 3
         continue
@@ -164,11 +194,23 @@ while [ "$RUNNING" = 1 ]; do
     if [ "$stalled" -gt "$STALL_S" ]; then
         restarts=$((restarts + 1))
         echo "[$(stamp)] ${stalled}초째 새 세그먼트가 없음 — 다시 시작합니다 (${restarts}회)"
-        kill "$FF_PID" 2>/dev/null
-        wait "$FF_PID" 2>/dev/null
+        stop_ffmpeg
         # 장치를 놓을 시간을 줍니다. 곧바로 다시 열면 실패합니다.
         sleep 2
         start_ffmpeg
         sleep 3
+
+        # 재시작해도 프레임이 돌아오지 않으면 카메라 쪽 문제입니다.
+        # ffmpeg을 몇 번 더 띄운다고 풀리지 않으므로 사람을 부릅니다.
+        failed=$((failed + 1))
+        if [ "$failed" -ge 5 ]; then
+            echo "[$(stamp)] 재시작 ${failed}회째 프레임이 돌아오지 않습니다."
+            echo "           웹캠 USB를 뽑았다 꽂아보세요."
+            echo "           다른 ffmpeg이 카메라를 붙잡고 있을 수도 있습니다:"
+            echo "           pgrep -fl ffmpeg"
+            failed=0
+        fi
+    else
+        failed=0
     fi
 done

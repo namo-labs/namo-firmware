@@ -16,6 +16,7 @@ const (
 	KindLock      = "lock"      // 잠김/풀림
 	KindGateway   = "gateway"   // Zigbee 게이트웨이 생존
 	KindDevice    = "device"    // 장치 자체의 online/offline
+	KindCamera    = "camera"    // 카메라 스트림 생존
 )
 
 // Event는 "언제 무슨 일이 있었나"입니다.

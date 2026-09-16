@@ -19,7 +19,7 @@ var indexHTML []byte
 //go:embed hls.min.js
 var hlsJS []byte
 
-func newRouter(cfg config, st *state, store *Store, events *EventStore, client mqtt.Client, pend *pending) http.Handler {
+func newRouter(cfg config, st *state, store *Store, events *EventStore, client mqtt.Client, pend *pending, cam *cameraProbe) http.Handler {
 	deviceID, apiToken := cfg.deviceID, cfg.apiToken
 	mux := http.NewServeMux()
 
@@ -62,6 +62,9 @@ func newRouter(cfg config, st *state, store *Store, events *EventStore, client m
 		if raw == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"error": "아직 텔레메트리를 받지 못했습니다",
+				// 장치가 조용해도 카메라는 볼 수 있습니다. 화면이
+				// 하나라도 옳은 말을 하려면 이쪽은 따로 줘야 합니다.
+				"camera": cam.get(),
 			})
 			return
 		}
@@ -71,6 +74,9 @@ func newRouter(cfg config, st *state, store *Store, events *EventStore, client m
 			"state":          json.RawMessage(raw),
 			"received_ago_s": int(time.Since(received).Seconds()),
 			"context":        buildContext(events),
+			// 재생기는 카메라가 얼어붙어도 마지막 세그먼트를 계속
+			// 받아 "재생 중"으로 보입니다. 신선한지는 서버만 압니다.
+			"camera": cam.get(),
 		})
 	})
 

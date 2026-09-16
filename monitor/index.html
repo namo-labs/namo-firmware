@@ -228,11 +228,15 @@ function fmt(v) {
 
 async function loadState() {
   const res = await fetch(api("/api/state"));
+  const body = await res.json().catch(() => ({}));
+  // 카메라 판정은 텔레메트리와 무관합니다. 장치가 조용해도 카메라는
+  // 볼 수 있어야 하므로, 실패한 응답에서도 먼저 꺼내 씁니다.
+  if (body.camera) setCamServer(body.camera);
   if (!res.ok) {
     document.getElementById("sub").textContent = "장치의 텔레메트리를 아직 받지 못했습니다";
     return;
   }
-  const { state: s, received_ago_s: ago, context: ctx } = await res.json();
+  const { state: s, received_ago_s: ago, context: ctx } = body;
   lastState = s;
   lastCtx = ctx || {};
 
@@ -382,7 +386,8 @@ function describe(e) {
     (e.k === "leak" && e.t !== "none") ||
     (e.k === "lock" && e.t === "true") ||
     (e.k === "gateway" && e.t === "false") ||
-    (e.k === "device" && e.t === "offline");
+    (e.k === "device" && e.t === "offline") ||
+    (e.k === "camera" && e.t !== "live");
   const from = e.f ? `${v(e.f)} → ` : "";
   return { cls: bad ? "no" : "ok", tag: label, text: `${from}${to}` };
 }
@@ -514,6 +519,7 @@ const REASONS = {
 const KIND_LABEL = {
   water: "급수", reservoir: "물통", leak: "누수",
   lock: "잠금", gateway: "게이트웨이", device: "장치",
+  camera: "카메라",
 };
 const STATUS_LABEL = { completed: "완료", rejected: "거부", aborted: "중단" };
 const VALUE_LABEL = {
@@ -521,6 +527,7 @@ const VALUE_LABEL = {
   none: "없음", detected: "감지됨",
   true: "예", false: "아니오",
   online: "연결됨", offline: "끊김",
+  live: "정상", stalled: "멈춤", down: "꺼짐",
 };
 
 const fmtTime = (ts) => {
@@ -706,6 +713,45 @@ let camOn = false;
 let camErr = null;
 let lastPos = -1;
 let stuckFor = 0;
+
+// 서버가 내린 카메라 판정.
+//
+// **재생기의 말은 믿을 수 없습니다.** 카메라가 얼어붙어도 플레이리스트는
+// 200을 그대로 주고 마지막 세그먼트도 받아져서, 몇 시간 전 화면을 틀면서
+// "LIVE"가 켜집니다. 실제로 6시간을 그랬습니다. 세그먼트가 방금 쓰였는지는
+// 파일을 볼 수 있는 서버만 압니다.
+let camServer = null;
+
+function setCamServer(c) {
+  camServer = c;
+  renderCamServer();
+}
+
+// 서버가 죽었다고 하면 배지와 화면을 그것으로 덮습니다. true를 돌려주면
+// 재생기 쪽 판정은 쓰지 않습니다.
+function renderCamServer() {
+  if (!camServer) return false;
+
+  if (camServer.status === "stalled") {
+    const ago = camServer.age_s == null ? "" : ` — 마지막 화면이 ${humanAgo(camServer.age_s)} 전입니다`;
+    setLive("err", "멈춤", `카메라가 프레임을 주지 않고 있습니다${ago}`);
+    camSay(`카메라가 멈췄습니다${ago}`);
+    return true;
+  }
+  if (camServer.status === "down") {
+    setLive("err", "꺼짐", camServer.error || "스트림 서버에 닿지 못했습니다");
+    camSay("카메라가 꺼져 있습니다");
+    return true;
+  }
+  return false;
+}
+
+function humanAgo(s) {
+  if (s < 60) return `${s}초`;
+  if (s < 3600) return `${Math.round(s / 60)}분`;
+  if (s < 86400) return `${Math.floor(s / 3600)}시간 ${Math.round((s % 3600) / 60)}분`;
+  return `${Math.floor(s / 86400)}일`;
+}
 
 // 끊긴 스트림에 다시 붙습니다. 카메라 쪽이 재시작하면 세그먼트 번호가
 // 건너뛰므로, 붙잡고 있던 재생기를 버리고 새로 여는 편이 빠릅니다.
@@ -903,6 +949,10 @@ setInterval(() => {
     renderWaterReady(lastState);
     renderWaterHint(lastState, lastCtx);
   }
+
+  // 서버가 죽었다고 하면 재생기가 무슨 말을 하든 그쪽이 맞습니다.
+  // 버퍼에 남은 옛 세그먼트를 재생하는 동안에도 LIVE가 켜지면 안 됩니다.
+  if (renderCamServer()) return;
 
   if (!camOn) return;
   if (camErr) return;              // 오류 표시를 덮어쓰지 않습니다.
