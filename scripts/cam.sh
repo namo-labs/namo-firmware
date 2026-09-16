@@ -20,6 +20,9 @@ PORT="${CAM_PORT:-8090}"
 FPS="${CAM_FPS:-10}"
 SIZE="${CAM_SIZE:-640x480}"
 DIR="${CAM_DIR:-/tmp/namo-cam}"
+# ffmpeg이 뱉는 것은 파일로 받습니다. 터미널로 흘리면 재시작이 잦을 때
+# 정작 봐야 할 첫 줄이 위로 밀려 사라집니다.
+LOG="$DIR/ffmpeg.log"
 # 640x480에 움직임이 거의 없는 화면이라 높게 잡을 이유가 없습니다.
 # 올리면 화질보다 끊김이 먼저 옵니다.
 BITRATE="${CAM_BITRATE:-500k}"
@@ -101,7 +104,11 @@ start_ffmpeg() {
     # 붙일 그림은 플레이어가 필요 없는 편이 낫습니다. 이미 디코딩한
     # 프레임을 쓰므로 부담이 거의 없습니다. atomic_writing 을 켜야
     # 쓰는 도중에 읽어 깨진 그림이 나가지 않습니다.
-    ffmpeg -hide_banner -loglevel warning \
+    # **-y가 없으면 안 됩니다.** 재시작할 때는 snapshot.jpg가 이미
+    # 있는데, 그러면 ffmpeg이 덮어쓸지 되묻고 답이 없어 죽습니다.
+    # 감시 루프는 그걸 다시 띄우고, 또 되묻고, 또 죽습니다. 실제로
+    # 84번을 그랬습니다.
+    ffmpeg -hide_banner -loglevel warning -y \
         -f avfoundation -pixel_format uyvy422 \
         -framerate "$FPS" -video_size "$SIZE" \
         -i "${VIDEO_DEV}:${AUDIO_DEV}" \
@@ -116,7 +123,7 @@ start_ffmpeg() {
         -hls_segment_filename "$DIR/seg%05d.ts" \
         "$DIR/stream.m3u8" \
         -map 0:v -vf fps=1/5 -update 1 -q:v 4 -atomic_writing 1 \
-        "$DIR/snapshot.jpg" &
+        "$DIR/snapshot.jpg" 2>>"$LOG" &
     FF_PID=$!
 }
 
@@ -167,6 +174,7 @@ fi
 echo "[$(stamp)] 스트리밍 시작됨"
 echo "  로컬 확인:  http://localhost:${PORT}/stream.m3u8"
 echo "  스냅샷:     http://localhost:${PORT}/snapshot.jpg"
+echo "  ffmpeg 로그: $LOG"
 echo "  멈추려면 Ctrl+C"
 echo
 
@@ -178,6 +186,8 @@ echo
 restarts=0
 # 재시작하고도 프레임이 돌아오지 않은 횟수.
 failed=0
+# ffmpeg이 뜨자마자 죽은 횟수.
+died=0
 while [ "$RUNNING" = 1 ]; do
     sleep 2
 
@@ -185,10 +195,24 @@ while [ "$RUNNING" = 1 ]; do
         restarts=$((restarts + 1))
         echo "[$(stamp)] ffmpeg이 종료됨 — 다시 시작합니다 (${restarts}회)"
         wait "$FF_PID" 2>/dev/null
+
+        # 뜨자마자 죽는 것은 몇 번을 더 띄워도 풀리지 않습니다.
+        # 명령줄이나 장치가 문제이므로 오류를 보여주고 사람을 부릅니다.
+        died=$((died + 1))
+        if [ "$died" -ge 3 ]; then
+            echo "[$(stamp)] ffmpeg이 뜨자마자 ${died}번 죽었습니다. 마지막 오류:"
+            tail -4 "$LOG" 2>/dev/null | sed 's/^/           /'
+            echo "           전체 로그: $LOG"
+            died=0
+        fi
+
         start_ffmpeg
         sleep 3
         continue
     fi
+
+    # 여기까지 왔다는 것은 3초를 넘겨 살아 있다는 뜻입니다.
+    died=0
 
     stalled=$(since_update)
     if [ "$stalled" -gt "$STALL_S" ]; then
