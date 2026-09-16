@@ -19,7 +19,7 @@ var indexHTML []byte
 //go:embed hls.min.js
 var hlsJS []byte
 
-func newRouter(st *state, store *Store, events *EventStore, client mqtt.Client, deviceID string, pend *pending) http.Handler {
+func newRouter(st *state, store *Store, events *EventStore, client mqtt.Client, deviceID, apiToken string, pend *pending) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/water", waterHandler(client, deviceID, pend, events))
@@ -87,7 +87,7 @@ func newRouter(st *state, store *Store, events *EventStore, client mqtt.Client, 
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	return mux
+	return withAuth(apiToken, mux)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
