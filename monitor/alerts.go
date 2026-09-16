@@ -14,6 +14,7 @@ const (
 	alertDry       = "dry"
 	alertDevice    = "device"
 	alertGateway   = "gateway"
+	alertCamera    = "camera"
 )
 
 // alertRules는 텔레메트리를 보고 알릴 것을 판단합니다.
@@ -34,9 +35,11 @@ type alertRules struct {
 	// 재부팅하는 동안 알림이 가면 성가십니다.
 	deviceGrace  time.Duration
 	gatewayGrace time.Duration
+	cameraGrace  time.Duration
 
 	deviceQuietSince time.Time
 	gatewayDownSince time.Time
+	cameraBadSince   time.Time
 }
 
 func newAlertRules(n *Notifier, dryPct int) *alertRules {
@@ -46,6 +49,9 @@ func newAlertRules(n *Notifier, dryPct int) *alertRules {
 		dryClearMargin: 10,
 		deviceGrace:    5 * time.Minute,
 		gatewayGrace:   10 * time.Minute,
+		// 카메라는 얼어붙을 때마다 cam.sh가 되살립니다. 그 사이의
+		// 몇십 초까지 알리면 성가시기만 합니다.
+		cameraGrace: 5 * time.Minute,
 	}
 }
 
@@ -169,5 +175,49 @@ func (r *alertRules) checkQuiet(lastSeen time.Time, now time.Time) {
 		"",
 		fmt.Sprintf("%s째 텔레메트리가 오지 않습니다.", humanDur(quiet)),
 		"전원이나 WiFi를 확인하세요.",
+	}, "\n"))
+}
+
+// checkCamera는 카메라가 오래 죽어 있을 때 알립니다.
+//
+// 급수와는 무관하니 급한 알림은 아닙니다. 다만 화면에 옛날 그림이 걸린
+// 채로 며칠이 지나면 그림을 믿게 되므로, 스스로 못 살아나는 것만
+// 알립니다.
+func (r *alertRules) checkCamera(status string, now time.Time) {
+	if r.n == nil {
+		return
+	}
+
+	// 판정 전이거나 살아 있으면 경보를 내립니다. unknown은 카메라가
+	// 나쁘다는 뜻이 아니라 아직 모른다는 뜻이라, 이걸로 알리지
+	// 않습니다.
+	if status == camLive || status == camUnknown {
+		r.cameraBadSince = time.Time{}
+		r.n.Clear(alertCamera, "✅ <b>카메라가 돌아왔습니다</b>")
+		return
+	}
+
+	if r.cameraBadSince.IsZero() {
+		r.cameraBadSince = now
+		return
+	}
+	if now.Sub(r.cameraBadSince) <= r.cameraGrace {
+		return
+	}
+
+	down := status == camDown
+	what := "화면이 멈춰 있습니다"
+	how := "맥에서 cam.sh 창을 보세요. ffmpeg이 카메라를 다시 잡지\n못하면 웹캠 USB를 뽑았다 꽂아야 합니다."
+	if down {
+		what = "스트림 서버가 꺼졌습니다"
+		how = "맥에서 ./scripts/cam.sh 를 다시 실행하세요."
+	}
+
+	r.n.Raise(alertCamera, strings.Join([]string{
+		"📷 <b>카메라가 멈췄습니다</b>",
+		"",
+		fmt.Sprintf("%s (%s째).", what, humanDur(now.Sub(r.cameraBadSince))),
+		"",
+		how,
 	}, "\n"))
 }

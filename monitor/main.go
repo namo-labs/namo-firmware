@@ -42,6 +42,10 @@ type config struct {
 
 	// 앱이 쓸 Bearer 토큰. 비어 있으면 Bearer 요청을 거부합니다.
 	apiToken string
+
+	// 카메라 스트림. 이 서비스가 직접 확인해 생존을 판정합니다.
+	camProbeURL string
+	camStallS   int64
 }
 
 func loadConfig() config {
@@ -60,6 +64,14 @@ func loadConfig() config {
 		dryPct: int(envInt("DRY_PCT", 50)),
 
 		apiToken: env("API_TOKEN", ""),
+
+		// 카메라는 맥에서 돌고 브라우저는 Caddy를 거쳐 봅니다. 판정은
+		// 이 서비스가 직접 맥을 찔러서 합니다.
+		camProbeURL: env("CAM_PROBE_URL", "http://192.168.5.2:8090/stream.m3u8"),
+		// 세그먼트는 1초마다 갱신됩니다. cam.sh가 8초 멈춤을 보고
+		// 재시작하고 그 복구에 몇 초가 더 걸리므로, 그보다 넉넉히
+		// 잡아야 정상 복구를 고장으로 부르지 않습니다.
+		camStallS: envInt("CAM_STALL_S", 25),
 	}
 }
 
@@ -150,9 +162,12 @@ func main() {
 
 	client := connectMQTT(cfg, st, store, events, pend, alerts)
 
+	cam := newCameraProbe(cfg.camProbeURL, time.Duration(cfg.camStallS)*time.Second)
+	go watchCamera(cam, events, alerts, 10*time.Second)
+
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: newRouter(cfg, st, store, events, client, pend),
+		Handler: newRouter(cfg, st, store, events, client, pend, cam),
 		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,
