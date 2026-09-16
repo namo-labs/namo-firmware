@@ -39,8 +39,10 @@ if [ "${1:-}" = "devices" ]; then
     exit 0
 fi
 
-rm -rf "$DIR"
+# 디렉토리는 남기고 안만 비웁니다. 통째로 지우면 이전 실행이 남긴
+# 서버가 사라진 디렉토리를 붙잡은 채로 남습니다.
 mkdir -p "$DIR"
+rm -f "$DIR"/*.ts "$DIR"/*.m3u8 "$DIR"/*.jpg "$DIR"/ffmpeg.log
 
 FF_PID=""
 SRV_PID=""
@@ -127,11 +129,39 @@ start_ffmpeg() {
     FF_PID=$!
 }
 
-# 플레이리스트가 마지막으로 바뀐 뒤 흐른 시간(초).
-since_update() {
-    local mtime
-    mtime=$(stat -f %m "$DIR/stream.m3u8" 2>/dev/null) || { echo 9999; return; }
-    echo $(( $(date +%s) - mtime ))
+# 플레이리스트의 미디어 시퀀스. 세그먼트가 하나 나올 때마다 늘어납니다.
+current_seq() {
+    sed -n 's/^#EXT-X-MEDIA-SEQUENCE:\([0-9][0-9]*\).*/\1/p' \
+        "$DIR/stream.m3u8" 2>/dev/null | head -1
+}
+
+# 새 세그먼트가 나온 지 흐른 시간을 STALLED에, 이번에 번호가 늘었는지를
+# ADVANCED에 넣습니다.
+#
+# **파일의 mtime을 보면 안 됩니다.** ffmpeg은 종료할 때도 플레이리스트를
+# 다시 쓰기 때문에, 재시작을 반복하는 동안 파일은 계속 새것처럼 보입니다.
+# 정작 프레임은 한 장도 안 나오는데 말입니다. 그러면 멈춘 것을 멈췄다고
+# 부르지 못하고, 재시작 횟수도 셀 수 없습니다.
+#
+# 값을 표준출력으로 돌려주지 않는 것은 $(...)가 서브셸이라 last_seq 갱신이
+# 사라지기 때문입니다.
+STALLED=0
+ADVANCED=0
+last_seq=""
+last_seq_at=$(date +%s)
+
+update_stall() {
+    local seq now
+    seq=$(current_seq)
+    now=$(date +%s)
+
+    ADVANCED=0
+    if [ -n "$seq" ] && [ "$seq" != "$last_seq" ]; then
+        last_seq="$seq"
+        last_seq_at="$now"
+        ADVANCED=1
+    fi
+    STALLED=$(( now - last_seq_at ))
 }
 
 # 이름이 실제로 있는지 먼저 봅니다. 없는 채로 들어가면 ffmpeg이
@@ -152,10 +182,31 @@ echo "카메라 $VIDEO_DEV · 마이크 $AUDIO_DEV · ${SIZE}@${FPS}fps · ${BIT
 echo "세그먼트: $DIR"
 echo
 
+# 포트를 이미 누가 듣고 있으면 여기서 멈춥니다.
+#
+# 예전 실행이 남긴 서버는 터미널을 닫아도 살아남아 고아가 됩니다.
+# 그대로 두고 새로 띄우면 이쪽이 "Address already in use"로 조용히
+# 죽고(출력을 버리므로 알 수도 없습니다), 옛 서버가 계속 내보냅니다.
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "포트 $PORT 를 이미 누가 듣고 있습니다:" >&2
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2
+    echo >&2
+    echo "예전 실행이 남긴 것이면 정리한 뒤 다시 실행하세요:" >&2
+    echo "  lsof -ti tcp:$PORT | xargs kill" >&2
+    exit 1
+fi
+
 # 세그먼트를 HTTP로 내보냅니다. 클러스터의 Caddy가 이 포트를 프록시합니다.
 # ffmpeg과 달리 이쪽은 끊길 일이 없어 한 번만 띄웁니다.
-(cd "$DIR" && python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1) &
+(cd "$DIR" && python3 -m http.server "$PORT" --bind 0.0.0.0 >>"$LOG" 2>&1) &
 SRV_PID=$!
+
+sleep 1
+if ! kill -0 "$SRV_PID" 2>/dev/null; then
+    echo "스트림 서버를 띄우지 못했습니다. 로그: $LOG" >&2
+    tail -3 "$LOG" >&2
+    exit 1
+fi
 
 start_ffmpeg
 
@@ -170,6 +221,8 @@ if [ ! -f "$DIR/stream.m3u8" ]; then
     echo "카메라 권한을 확인하세요: 시스템 설정 → 개인정보 보호 및 보안 → 카메라" >&2
     cleanup
 fi
+
+last_seq_at=$(date +%s)
 
 echo "[$(stamp)] 스트리밍 시작됨"
 echo "  로컬 확인:  http://localhost:${PORT}/stream.m3u8"
@@ -214,15 +267,22 @@ while [ "$RUNNING" = 1 ]; do
     # 여기까지 왔다는 것은 3초를 넘겨 살아 있다는 뜻입니다.
     died=0
 
-    stalled=$(since_update)
-    if [ "$stalled" -gt "$STALL_S" ]; then
+    update_stall
+    # **프레임이 실제로 나왔을 때만** 실패 횟수를 지웁니다. 재시작했다는
+    # 이유로 지우면 영원히 1을 넘지 못해, 사람을 부를 일이 없어집니다.
+    [ "$ADVANCED" = 1 ] && failed=0
+
+    if [ "$STALLED" -gt "$STALL_S" ]; then
         restarts=$((restarts + 1))
-        echo "[$(stamp)] ${stalled}초째 새 세그먼트가 없음 — 다시 시작합니다 (${restarts}회)"
+        echo "[$(stamp)] ${STALLED}초째 새 세그먼트가 없음 — 다시 시작합니다 (${restarts}회)"
         stop_ffmpeg
         # 장치를 놓을 시간을 줍니다. 곧바로 다시 열면 실패합니다.
         sleep 2
         start_ffmpeg
         sleep 3
+        # 새로 뜬 ffmpeg에 첫 세그먼트를 낼 시간을 줍니다. 이걸 안 하면
+        # 2초마다 다시 죽입니다.
+        last_seq_at=$(date +%s)
 
         # 재시작해도 프레임이 돌아오지 않으면 카메라 쪽 문제입니다.
         # ffmpeg을 몇 번 더 띄운다고 풀리지 않으므로 사람을 부릅니다.
@@ -232,9 +292,6 @@ while [ "$RUNNING" = 1 ]; do
             echo "           웹캠 USB를 뽑았다 꽂아보세요."
             echo "           다른 ffmpeg이 카메라를 붙잡고 있을 수도 있습니다:"
             echo "           pgrep -fl ffmpeg"
-            failed=0
         fi
-    else
-        failed=0
     fi
 done
