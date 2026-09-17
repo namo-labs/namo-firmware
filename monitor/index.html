@@ -904,6 +904,12 @@ async function camStart() {
     });
   });
 
+  // 소리 없이 내보내는 경우(CAM_AUDIO=none)에는 소리 버튼을 숨깁니다.
+  // 눌러도 아무 일이 없는 버튼은 고장처럼 보입니다.
+  hls.on(Hls.Events.BUFFER_CODECS, (_, tracks) => {
+    document.getElementById("camSound").hidden = !tracks.audio;
+  });
+
   hls.on(Hls.Events.FRAG_LOADED, () => {
     camErr = null;
     clearTimeout(retryTimer);

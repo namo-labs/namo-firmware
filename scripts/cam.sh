@@ -15,6 +15,8 @@ set -uo pipefail
 # 장치는 **이름으로** 지정합니다. 번호는 아이폰이 붙었다 떨어질 때마다
 # 밀려서, 어제 되던 명령이 오늘 "Invalid audio device index"로 죽습니다.
 VIDEO_DEV="${CAM_VIDEO:-USB2.0 PC CAMERA}"
+# 소리가 필요 없으면 CAM_AUDIO=none 으로 끕니다. 마이크가 흔들리면
+# 영상까지 끌려가 멈추는데, 소리를 끄면 그 연결이 끊깁니다.
 AUDIO_DEV="${CAM_AUDIO:-USB2.0 MIC}"
 PORT="${CAM_PORT:-8090}"
 FPS="${CAM_FPS:-10}"
@@ -98,6 +100,13 @@ stop_ffmpeg() {
     FF_PID=""
 }
 
+# 소리를 끄면 인코딩 인자도 뺍니다.
+if [ "$AUDIO_DEV" = "none" ]; then
+    AUDIO_ARGS=(-an)
+else
+    AUDIO_ARGS=(-c:a aac -b:a 64k -ar 44100 -ac 1)
+fi
+
 start_ffmpeg() {
     # HLS 세그먼트를 만듭니다.
     #
@@ -113,10 +122,12 @@ start_ffmpeg() {
     # 화면이 바뀌는 순간 실제 비트레이트가 튀고, 그때 세그먼트가 커져
     # 재생이 끊깁니다.
     #
-    # max_interleave_delta는 muxer가 늦는 스트림을 기다려주는 한도입니다.
-    # 기본값은 10초라, 마이크가 조금만 늦게 붙어도 영상까지 10초를 붙잡고
-    # 아무것도 쓰지 않습니다. 식물 화면에서 소리가 몇 초 어긋나는 것보다
-    # 화면이 멈추는 편이 훨씬 나쁘므로 2초로 줄입니다.
+    # muxer는 늦게 오는 소리를 기다렸다가 영상과 시간순으로 섞어 씁니다.
+    # **이 기다림을 줄이면 안 됩니다.** 기다리지 않으면 늦은 소리가 엉뚱한
+    # 세그먼트에 몰려 들어가고, 브라우저는 시간이 어긋난 세그먼트를
+    # 받아들이지 못해(bufferAppendError) 멈춥니다. 한도를 2초로 줄였다가
+    # 실제로 그랬습니다. 기다리는 동안 파일이 안 나오는 것은 감시 쪽이
+    # START_WAIT_S로 견딥니다.
     #
     # HLS와 함께 5초마다 JPEG 한 장을 덮어씁니다. 앱 목록이나 알림에
     # 붙일 그림은 플레이어가 필요 없는 편이 낫습니다. 이미 디코딩한
@@ -135,8 +146,7 @@ start_ffmpeg() {
         -pix_fmt yuv420p -profile:v baseline \
         -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 \
         -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
-        -c:a aac -b:a 64k -ar 44100 -ac 1 \
-        -max_interleave_delta 2000000 \
+        "${AUDIO_ARGS[@]}" \
         -f hls -hls_time 1 -hls_list_size 4 \
         -hls_flags delete_segments+independent_segments+omit_endlist \
         -hls_segment_filename "$DIR/seg%05d.ts" \
@@ -196,6 +206,7 @@ in_grace() {
 # 알아보기 어려운 오류를 내고 죽습니다.
 DEVICES="$(ffmpeg -f avfoundation -list_devices true -i "" 2>&1)"
 for d in "$VIDEO_DEV" "$AUDIO_DEV"; do
+    [ "$d" = "none" ] && continue
     if ! grep -qF "$d" <<<"$DEVICES"; then
         echo "장치를 찾지 못했습니다: $d" >&2
         echo >&2
