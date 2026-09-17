@@ -23,6 +23,9 @@ DIR="${CAM_DIR:-/tmp/namo-cam}"
 # ffmpeg이 뱉는 것은 파일로 받습니다. 터미널로 흘리면 재시작이 잦을 때
 # 정작 봐야 할 첫 줄이 위로 밀려 사라집니다.
 LOG="$DIR/ffmpeg.log"
+# 스트림 서버의 출력은 따로 받습니다. 접속 기록이 요청마다 한 줄씩 쌓여,
+# 같은 파일에 두면 정작 ffmpeg 오류가 묻힙니다.
+SRV_LOG="$DIR/server.log"
 # 640x480에 움직임이 거의 없는 화면이라 높게 잡을 이유가 없습니다.
 # 올리면 화질보다 끊김이 먼저 옵니다.
 BITRATE="${CAM_BITRATE:-500k}"
@@ -50,7 +53,7 @@ fi
 # 디렉토리는 남기고 안만 비웁니다. 통째로 지우면 이전 실행이 남긴
 # 서버가 사라진 디렉토리를 붙잡은 채로 남습니다.
 mkdir -p "$DIR"
-rm -f "$DIR"/*.ts "$DIR"/*.m3u8 "$DIR"/*.jpg "$DIR"/ffmpeg.log
+rm -f "$DIR"/*.ts "$DIR"/*.m3u8 "$DIR"/*.jpg "$DIR"/*.log
 
 FF_PID=""
 SRV_PID=""
@@ -223,13 +226,13 @@ fi
 
 # 세그먼트를 HTTP로 내보냅니다. 클러스터의 Caddy가 이 포트를 프록시합니다.
 # ffmpeg과 달리 이쪽은 끊길 일이 없어 한 번만 띄웁니다.
-(cd "$DIR" && python3 -m http.server "$PORT" --bind 0.0.0.0 >>"$LOG" 2>&1) &
+(cd "$DIR" && python3 -m http.server "$PORT" --bind 0.0.0.0 >>"$SRV_LOG" 2>&1) &
 SRV_PID=$!
 
 sleep 1
 if ! kill -0 "$SRV_PID" 2>/dev/null; then
-    echo "스트림 서버를 띄우지 못했습니다. 로그: $LOG" >&2
-    tail -3 "$LOG" >&2
+    echo "스트림 서버를 띄우지 못했습니다. 로그: $SRV_LOG" >&2
+    tail -3 "$SRV_LOG" >&2
     exit 1
 fi
 
