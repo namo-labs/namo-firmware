@@ -28,6 +28,14 @@ LOG="$DIR/ffmpeg.log"
 BITRATE="${CAM_BITRATE:-500k}"
 # 세그먼트가 이 시간 동안 갱신되지 않으면 얼어붙은 것으로 봅니다.
 STALL_S="${CAM_STALL_S:-8}"
+# 새로 띄운 ffmpeg에 첫 세그먼트를 기다려주는 시간. 이 동안은 멈춤을
+# 판정하지 않습니다.
+#
+# 장치를 여는 데 몇 초, muxer가 오디오와 영상을 맞추느라 또 몇 초가
+# 걸립니다. 이것을 STALL_S로 재면 첫 세그먼트가 나오기 직전에 죽이고,
+# 죽이면서 쌓인 것을 쏟게 하고, 다시 띄우는 일을 끝없이 되풀이합니다.
+# 실제로 14시간을 10초마다 그랬습니다.
+START_WAIT_S="${CAM_START_WAIT_S:-30}"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "ffmpeg이 없습니다. brew install ffmpeg" >&2
@@ -102,6 +110,11 @@ start_ffmpeg() {
     # 화면이 바뀌는 순간 실제 비트레이트가 튀고, 그때 세그먼트가 커져
     # 재생이 끊깁니다.
     #
+    # max_interleave_delta는 muxer가 늦는 스트림을 기다려주는 한도입니다.
+    # 기본값은 10초라, 마이크가 조금만 늦게 붙어도 영상까지 10초를 붙잡고
+    # 아무것도 쓰지 않습니다. 식물 화면에서 소리가 몇 초 어긋나는 것보다
+    # 화면이 멈추는 편이 훨씬 나쁘므로 2초로 줄입니다.
+    #
     # HLS와 함께 5초마다 JPEG 한 장을 덮어씁니다. 앱 목록이나 알림에
     # 붙일 그림은 플레이어가 필요 없는 편이 낫습니다. 이미 디코딩한
     # 프레임을 쓰므로 부담이 거의 없습니다. atomic_writing 을 켜야
@@ -120,6 +133,7 @@ start_ffmpeg() {
         -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 \
         -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
         -c:a aac -b:a 64k -ar 44100 -ac 1 \
+        -max_interleave_delta 2000000 \
         -f hls -hls_time 1 -hls_list_size 4 \
         -hls_flags delete_segments+independent_segments+omit_endlist \
         -hls_segment_filename "$DIR/seg%05d.ts" \
@@ -156,12 +170,23 @@ update_stall() {
     now=$(date +%s)
 
     ADVANCED=0
-    if [ -n "$seq" ] && [ "$seq" != "$last_seq" ]; then
+    if [ -n "$seq" ]; then
+        if [ -z "$last_seq" ] || [ "$seq" -gt "$last_seq" ]; then
+            last_seq_at="$now"
+            ADVANCED=1
+        fi
+        # 줄어든 것은 ffmpeg이 새로 떠서 0부터 다시 센 것입니다. 기준만
+        # 옮기고 진행으로 세지 않습니다. 바뀌었다는 이유만으로 세면,
+        # 죽을 때마다 쏟아낸 세그먼트를 살아난 것으로 착각합니다.
         last_seq="$seq"
-        last_seq_at="$now"
-        ADVANCED=1
     fi
     STALLED=$(( now - last_seq_at ))
+}
+
+# 재시작 뒤 첫 세그먼트를 기다리는 동안이면 참입니다.
+GRACE_UNTIL=0
+in_grace() {
+    [ "$(date +%s)" -lt "$GRACE_UNTIL" ]
 }
 
 # 이름이 실제로 있는지 먼저 봅니다. 없는 채로 들어가면 ffmpeg이
@@ -260,6 +285,7 @@ while [ "$RUNNING" = 1 ]; do
         fi
 
         start_ffmpeg
+        GRACE_UNTIL=$(( $(date +%s) + START_WAIT_S ))
         sleep 3
         continue
     fi
@@ -268,30 +294,49 @@ while [ "$RUNNING" = 1 ]; do
     died=0
 
     update_stall
-    # **프레임이 실제로 나왔을 때만** 실패 횟수를 지웁니다. 재시작했다는
-    # 이유로 지우면 영원히 1을 넘지 못해, 사람을 부를 일이 없어집니다.
-    [ "$ADVANCED" = 1 ] && failed=0
+    if [ "$ADVANCED" = 1 ]; then
+        # **프레임이 실제로 나왔을 때만** 실패 횟수를 지웁니다. 재시작했다는
+        # 이유로 지우면 영원히 1을 넘지 못해, 사람을 부를 일이 없어집니다.
+        if [ "$failed" -gt 0 ]; then
+            echo "[$(stamp)] 세그먼트가 다시 나옵니다"
+        fi
+        failed=0
+        GRACE_UNTIL=0
+    fi
+
+    # 새로 띄운 ffmpeg은 첫 세그먼트를 낼 때까지 건드리지 않습니다.
+    if in_grace; then
+        continue
+    fi
 
     if [ "$STALLED" -gt "$STALL_S" ]; then
         restarts=$((restarts + 1))
+        failed=$((failed + 1))
         echo "[$(stamp)] ${STALLED}초째 새 세그먼트가 없음 — 다시 시작합니다 (${restarts}회)"
         stop_ffmpeg
-        # 장치를 놓을 시간을 줍니다. 곧바로 다시 열면 실패합니다.
-        sleep 2
+
+        # 실패가 이어지면 간격을 늘립니다. 카메라가 안 돌아오는데 10초마다
+        # USB 장치를 여닫으면 장치를 더 괴롭힐 뿐입니다.
+        backoff=2
+        if [ "$failed" -ge 3 ]; then
+            backoff=$(( failed * 10 ))
+            [ "$backoff" -gt 120 ] && backoff=120
+            echo "           ${backoff}초 쉬었다 띄웁니다"
+        fi
+        sleep "$backoff"
+
         start_ffmpeg
-        sleep 3
-        # 새로 뜬 ffmpeg에 첫 세그먼트를 낼 시간을 줍니다. 이걸 안 하면
-        # 2초마다 다시 죽입니다.
+        GRACE_UNTIL=$(( $(date +%s) + START_WAIT_S ))
         last_seq_at=$(date +%s)
 
         # 재시작해도 프레임이 돌아오지 않으면 카메라 쪽 문제입니다.
         # ffmpeg을 몇 번 더 띄운다고 풀리지 않으므로 사람을 부릅니다.
-        failed=$((failed + 1))
-        if [ "$failed" -ge 5 ]; then
+        if [ "$failed" -eq 5 ]; then
             echo "[$(stamp)] 재시작 ${failed}회째 프레임이 돌아오지 않습니다."
             echo "           웹캠 USB를 뽑았다 꽂아보세요."
             echo "           다른 ffmpeg이 카메라를 붙잡고 있을 수도 있습니다:"
             echo "           pgrep -fl ffmpeg"
+            echo "           ffmpeg 로그: $LOG"
         fi
     fi
 done

@@ -273,10 +273,113 @@ func TestCamera둘다늙으면더나쁜쪽을쓴다(t *testing.T) {
 
 func Test미디어시퀀스를읽는다(t *testing.T) {
 	seq, err := mediaSequence(strings.NewReader(playlist(1541)))
-	if err != nil || seq != "1541" {
-		t.Fatalf("seq = %q, err = %v", seq, err)
+	if err != nil || seq != 1541 {
+		t.Fatalf("seq = %d, err = %v", seq, err)
 	}
 	if _, err := mediaSequence(strings.NewReader("#EXTM3U\n")); err == nil {
 		t.Fatal("번호가 없는데 읽었다고 합니다")
+	}
+}
+
+// probeSeq는 주어진 번호들을 10초 간격으로 차례로 확인하고, 매번의
+// 상태를 돌려줍니다.
+func probeSeq(t *testing.T, seqs []int) []string {
+	t.Helper()
+	base := time.Now()
+	var resps []camResp
+	for i, n := range seqs {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		resps = append(resps, camResp{seq: n, lastMod: at, now: at})
+	}
+	s := camServerSeq(t, time.Time{}, time.Time{}, http.StatusOK, resps)
+	c := newCameraProbe(s.URL, 25*time.Second)
+
+	var out []string
+	for range seqs {
+		c.probe(context.Background())
+		out = append(out, c.get().Status)
+	}
+	return out
+}
+
+// 14시간 동안 실제로 벌어진 일입니다. 감시가 10초마다 ffmpeg을 죽이고,
+// 죽을 때마다 쌓인 세그먼트가 한꺼번에 쓰여 번호가 가끔 한 번씩
+// 뜁니다. 한 번 뛴 것을 복구로 보면 멈춤과 복구를 오가며 알림이
+// 나갑니다.
+func TestCamera한번뛴번호로는살아났다고하지않는다(t *testing.T) {
+	// 정상 → 멈춤(제자리) → 한 번 뜀 → 다시 제자리 …
+	seqs := []int{100, 110, 120, 120, 120, 120, 121, 121, 121, 122, 122, 122}
+	got := probeSeq(t, seqs)
+
+	stalledAt := -1
+	for i, st := range got {
+		if st == camStalled {
+			stalledAt = i
+			break
+		}
+	}
+	if stalledAt < 0 {
+		t.Fatalf("멈춤을 잡지 못했습니다: %v", got)
+	}
+	for i := stalledAt; i < len(got); i++ {
+		if got[i] == camLive {
+			t.Fatalf("%d번째 확인에서 live로 돌아갔습니다: %v", i, got)
+		}
+	}
+}
+
+func TestCamera연속으로늘면살아났다고한다(t *testing.T) {
+	seqs := []int{100, 110, 120, 120, 120, 120, 125, 130, 135}
+	got := probeSeq(t, seqs)
+
+	if got[5] != camStalled {
+		t.Fatalf("멈춤을 잡지 못했습니다: %v", got)
+	}
+	if got[6] != camStalled {
+		t.Fatalf("한 번 늘었다고 바로 살렸습니다: %v", got)
+	}
+	if got[7] != camLive {
+		t.Fatalf("두 번 연속 늘었는데 살리지 않았습니다: %v", got)
+	}
+}
+
+// ffmpeg이 새로 뜨면 번호가 0부터 다시 시작합니다. 줄어든 것을 진행으로
+// 세면 안 되지만, 그 뒤로 늘어나는 것은 진짜 진행입니다.
+func TestCamera재시작으로줄어든번호는진행이아니다(t *testing.T) {
+	seqs := []int{2160, 2170, 2180, 2180, 2180, 2180, 0, 0, 5, 10, 15}
+	got := probeSeq(t, seqs)
+
+	if got[5] != camStalled {
+		t.Fatalf("멈춤을 잡지 못했습니다: %v", got)
+	}
+	if got[6] == camLive || got[7] == camLive {
+		t.Fatalf("줄어든 번호를 복구로 봤습니다: %v", got)
+	}
+	if got[len(got)-1] != camLive {
+		t.Fatalf("재시작 뒤 실제로 늘었는데 살리지 않았습니다: %v", got)
+	}
+}
+
+// 복구를 보류하는 동안에도 나이는 멈춘 때부터 잽니다.
+func TestCamera보류중에도나이는멈춘때부터(t *testing.T) {
+	base := time.Now()
+	seqs := []int{100, 110, 120, 120, 120, 120, 121}
+	var resps []camResp
+	for i, n := range seqs {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		resps = append(resps, camResp{seq: n, lastMod: at, now: at})
+	}
+	s := camServerSeq(t, time.Time{}, time.Time{}, http.StatusOK, resps)
+	c := newCameraProbe(s.URL, 25*time.Second)
+	for range seqs {
+		c.probe(context.Background())
+	}
+
+	got := c.get()
+	if got.Status != camStalled {
+		t.Fatalf("status = %q, 기대 stalled", got.Status)
+	}
+	if got.AgeS == nil || *got.AgeS < 30 {
+		t.Fatalf("age_s = %v, 마지막 정상(20초 시점)부터 40초쯤이어야 합니다", got.AgeS)
 	}
 }
