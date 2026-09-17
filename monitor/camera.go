@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +58,27 @@ type cameraProbe struct {
 	// 마지막으로 본 세그먼트 번호와, 그것이 바뀐 시각.
 	// 시각은 **스트림 서버의 시계로** 적습니다. 나이를 잴 때 같은 쪽
 	// 시계끼리 빼야 클러스터와 맥의 시계 차이가 사라집니다.
-	lastSeq   string
+	lastSeq   int64
+	hasSeq    bool
 	lastSeqAt time.Time
+
+	// 번호가 연속으로 늘어난 확인 횟수. 멈췄던 카메라를 살아났다고
+	// 부르려면 이것이 recoverStreak에 닿아야 합니다.
+	streak int
+	// 살아 있던 동안 번호가 마지막으로 늘어난 시각(스트림 서버 시계). 복구를 보류하는
+	// 동안 나이는 여기서부터 잽니다. 방금 한 번 뛴 번호로 재면 멈춘 화면을
+	// 두고 "0초 전"이라고 말하게 됩니다.
+	lastGoodAt time.Time
 }
+
+// 멈췄던 카메라가 살아났다고 인정하는 데 필요한, 번호가 연속으로 늘어난
+// 확인 횟수.
+//
+// 한 번으로는 모자랍니다. 감시 스크립트가 ffmpeg을 죽이면 그때까지 쌓인
+// 세그먼트가 한꺼번에 쓰여 번호가 한 번 뜁니다. 이것을 복구로 보면 멈춤과
+// 복구를 1분마다 오가며, 그때마다 알림이 나갑니다. 실제로 14시간 동안
+// 84통이 나갔습니다.
+const recoverStreak = 2
 
 func newCameraProbe(url string, stall time.Duration) *cameraProbe {
 	return &cameraProbe{
@@ -90,11 +109,29 @@ func (c *cameraProbe) get() cameraStatus {
 
 // probe는 한 번 확인하고, 상태가 바뀌었으면 이전 상태를 함께 돌려줍니다.
 func (c *cameraProbe) probe(ctx context.Context) (from, to string) {
-	status, age, errMsg := c.check(ctx)
+	status, age, errMsg, now := c.check(ctx)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	from = c.status
+
+	// 살아 있지 않던 카메라는 번호가 연속으로 늘어야 살아났다고 합니다.
+	// 번호를 읽을 수 없는 서버라면 판단할 근거가 없으므로 막지 않습니다.
+	if status == camLive && from != camLive && c.hasSeq && c.streak < recoverStreak {
+		status, errMsg = from, c.errMsg
+		if status == camUnknown {
+			errMsg = ""
+		}
+		if !c.lastGoodAt.IsZero() {
+			age = int(now.Sub(c.lastGoodAt).Seconds())
+		}
+	}
+	// 번호가 실제로 늘어난 확인만 적습니다. 제자리였던 확인까지 적으면
+	// 멈추기 시작한 뒤의 몇십 초가 "정상"으로 섞여 나이가 짧게 나옵니다.
+	if status == camLive && c.streak > 0 {
+		c.lastGoodAt = now
+	}
+
 	c.status, c.ageS, c.errMsg, c.checked = status, age, errMsg, time.Now()
 	if from == status {
 		return "", ""
@@ -102,21 +139,23 @@ func (c *cameraProbe) probe(ctx context.Context) (from, to string) {
 	return from, status
 }
 
-func (c *cameraProbe) check(ctx context.Context) (status string, ageS int, errMsg string) {
+// check는 한 번 확인한 원래 판정을 돌려줍니다. 마지막 값은 스트림 서버의
+// 시각이며, 닿지 못했으면 이쪽 시각입니다.
+func (c *cameraProbe) check(ctx context.Context) (status string, ageS int, errMsg string, at time.Time) {
 	// 플레이리스트는 200바이트 남짓입니다. 세그먼트 번호를 읽어야
 	// 하므로 본문까지 받습니다.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
-		return camDown, -1, err.Error()
+		return camDown, -1, err.Error(), time.Now()
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return camDown, -1, "스트림 서버에 닿지 못했습니다"
+		return camDown, -1, "스트림 서버에 닿지 못했습니다", time.Now()
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return camDown, -1, "스트림 서버가 " + resp.Status + "를 돌려줬습니다"
+		return camDown, -1, "스트림 서버가 " + resp.Status + "를 돌려줬습니다", time.Now()
 	}
 
 	// 나이는 **스트림 서버의 시계로** 잽니다. 이 서비스는 클러스터
@@ -133,7 +172,7 @@ func (c *cameraProbe) check(ctx context.Context) (status string, ageS int, errMs
 		// 둘 다 읽지 못하면 신선도를 알 수 없습니다. 받아진다는
 		// 것만으로 살아 있다고 하면 지금 고치려는 바로 그 착각을
 		// 되풀이하게 되므로, 모른다고 말합니다.
-		return camUnknown, -1, "플레이리스트에서 신선도를 읽지 못했습니다"
+		return camUnknown, -1, "플레이리스트에서 신선도를 읽지 못했습니다", now
 	}
 
 	age := time.Duration(-1)
@@ -142,11 +181,22 @@ func (c *cameraProbe) check(ctx context.Context) (status string, ageS int, errMs
 	// 세그먼트 번호가 먼저입니다. 프레임이 실제로 나와야 늘어납니다.
 	if seqErr == nil {
 		c.mu.Lock()
-		if seq != c.lastSeq {
-			c.lastSeq, c.lastSeqAt = seq, now
-		} else if c.lastSeqAt.IsZero() {
+		switch {
+		case !c.hasSeq:
+			// 첫 관측은 기준만 잡습니다. 늘었는지는 다음부터 압니다.
 			c.lastSeqAt = now
+			c.streak = 0
+		case seq > c.lastSeq:
+			c.lastSeqAt = now
+			c.streak++
+		case seq < c.lastSeq:
+			// ffmpeg이 새로 떠서 0부터 다시 센 것입니다. 기준만 옮기고
+			// 진행으로 세지 않습니다.
+			c.streak = 0
+		default:
+			c.streak = 0
 		}
+		c.lastSeq, c.hasSeq = seq, true
 		since := now.Sub(c.lastSeqAt)
 		c.mu.Unlock()
 
@@ -165,29 +215,29 @@ func (c *cameraProbe) check(ctx context.Context) (status string, ageS int, errMs
 		age = 0
 	}
 	if age > c.stall {
-		return camStalled, int(age.Seconds()), why
+		return camStalled, int(age.Seconds()), why, now
 	}
-	return camLive, int(age.Seconds()), ""
+	return camLive, int(age.Seconds()), "", now
 }
 
 // mediaSequence는 플레이리스트에서 EXT-X-MEDIA-SEQUENCE 값을 읽습니다.
 //
 // 이 번호는 세그먼트가 하나 만들어질 때마다 늘어납니다. 파일이 다시
 // 쓰이는 것과 달리, 프레임이 실제로 나오지 않으면 제자리입니다.
-func mediaSequence(r io.Reader) (string, error) {
+func mediaSequence(r io.Reader) (int64, error) {
 	const tag = "#EXT-X-MEDIA-SEQUENCE:"
 
 	sc := bufio.NewScanner(io.LimitReader(r, 64*1024))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if v, ok := strings.CutPrefix(line, tag); ok {
-			return strings.TrimSpace(v), nil
+			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", err
+		return 0, err
 	}
-	return "", errNoSequence
+	return 0, errNoSequence
 }
 
 type noSequence struct{}
