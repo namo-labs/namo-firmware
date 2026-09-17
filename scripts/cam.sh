@@ -110,9 +110,12 @@ fi
 start_ffmpeg() {
     # HLS 세그먼트를 만듭니다.
     #
-    # 1초 세그먼트를 4개만 유지합니다. 길게 잡으면 지연이 그만큼 늘고,
-    # 짧게 잡으면 요청이 잦아집니다. 식물을 보는 용도라 3~5초 지연은
-    # 충분히 실시간으로 느껴집니다.
+    # 1초 세그먼트를 10개 유지합니다.
+    #
+    # 이 마이크는 소리를 5초마다 몰아서 넘기고, muxer는 그 소리를 기다렸다
+    # 영상과 맞춰 쓰므로 세그먼트도 5초마다 5개씩 한꺼번에 나옵니다. 4개만
+    # 유지하면 한 묶음이 들어오는 순간 앞의 것이 지워져, 브라우저가 받기도
+    # 전에 404가 납니다. 한 묶음보다 넉넉해야 합니다.
     #
     # 카메라는 4:2:2(uyvy422)로 주지만 출력은 yuv420p로 바꿉니다.
     # baseline 프로파일이 4:2:2를 받지 못하고, 브라우저도 4:2:0을
@@ -147,7 +150,7 @@ start_ffmpeg() {
         -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 \
         -b:v "$BITRATE" -maxrate "$BITRATE" -bufsize "$BITRATE" \
         "${AUDIO_ARGS[@]}" \
-        -f hls -hls_time 1 -hls_list_size 4 \
+        -f hls -hls_time 1 -hls_list_size 10 \
         -hls_flags delete_segments+independent_segments+omit_endlist \
         -hls_segment_filename "$DIR/seg%05d.ts" \
         "$DIR/stream.m3u8" \
