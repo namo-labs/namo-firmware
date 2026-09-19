@@ -366,8 +366,8 @@ function describe(e) {
   const v = (x) => VALUE_LABEL[x] ?? x;
 
   if (e.k === "water") {
-    const tag = STATUS_LABEL[e.status] || e.status;
-    if (e.status === "completed") {
+    const tag = STATUS_LABEL[e.s] || e.s;
+    if (e.s === "completed") {
       return { cls: "ok", tag, text: `${e.ml}mL${e.pms ? ` · ${(e.pms / 1000).toFixed(1)}초` : ""}${e.src === "web" ? " · 웹" : ""}` };
     }
     const why = REASONS[e.r] || e.r || "";
