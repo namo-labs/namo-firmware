@@ -75,6 +75,10 @@
 
 - **Zigbee2MQTT** — LaunchAgent가 15초 안에 되살립니다.
   `launchctl list | grep zigbee2mqtt`
+  동글 포트 이름(`/dev/cu.usbserial-XXX`)은 꽂힌 위치로 정해져, 허브를
+  바꾸거나 다른 구멍에 꽂으면 달라집니다. `gateway/z2m-start.sh`가 띄울
+  때마다 장치 이름으로 동글을 찾아 포트를 넘기므로 설정을 고칠 필요가
+  없습니다. 동글이 빠져 있으면 꽂힐 때까지 15초마다 다시 시도합니다.
 - **mosquitto** — 도커 `unless-stopped`
 - **ESP32** — WiFi·MQTT 모두 무한 재시도
 - **카메라 ffmpeg** — `cam.sh`가 세그먼트 갱신을 보고 재시작

@@ -22,10 +22,12 @@
     <!-- node 는 반드시 node@24 를 씁니다. 기본 node 는 Zigbee2MQTT 가
          지원하는 범위를 벗어나, serialport 네이티브 모듈이 어긋나면서
          어댑터 고장과 똑같은 증상을 냅니다. -->
+    <!-- node를 바로 부르지 않고 z2m-start.sh를 거칩니다. 동글 포트 이름은
+         꽂힌 위치에 따라 바뀌므로, 띄울 때마다 장치 이름으로 찾아 넘깁니다. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/opt/node@24/bin/node</string>
-        <string>index.js</string>
+        <string>/bin/bash</string>
+        <string>/Users/kdh/project/namo-firmware/gateway/z2m-start.sh</string>
     </array>
 
     <key>WorkingDirectory</key>

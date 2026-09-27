@@ -8,9 +8,10 @@ mqtt:
   server: mqtt://localhost:1883
 
 serial:
-  # SONOFF ZBDongle-E. 포트 이름은 꽂는 위치에 따라 달라지므로
-  # `ls /dev/cu.usbserial-*`로 확인해 맞춥니다.
-  port: /dev/cu.usbserial-3130
+  # SONOFF ZBDongle-E. 포트 이름은 꽂는 위치에 따라 달라집니다.
+  # LaunchAgent로 띄우면 z2m-start.sh가 장치 이름으로 찾아 이 값을
+  # 덮어쓰므로, 여기 값은 손으로 직접 띄울 때만 쓰입니다.
+  port: /dev/cu.usbserial-140
   # ZBDongle-E는 EmberZNet 칩입니다. TI 칩을 쓰는 ZBDongle-P와 달라
   # adapter를 ember로 지정해야 합니다. 이걸 틀리면 동글을 못 엽니다.
   adapter: ember
