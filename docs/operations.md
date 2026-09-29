@@ -79,19 +79,35 @@
   바꾸거나 다른 구멍에 꽂으면 달라집니다. `gateway/z2m-start.sh`가 띄울
   때마다 장치 이름으로 동글을 찾아 포트를 넘기므로 설정을 고칠 필요가
   없습니다. 동글이 빠져 있으면 꽂힐 때까지 15초마다 다시 시도합니다.
-- **mosquitto** — 도커 `unless-stopped`
+- **mosquitto** — 도커 `unless-stopped`. 도커 앱은 로그인할 때 자동으로
+  뜨게 해둡니다(Docker Desktop 설정 `AutoStart`). 꺼져 있으면 재부팅 뒤
+  MQTT가 통째로 빠지고, Zigbee2MQTT가 붙을 곳이 없어 누수를 알 수 없게
+  되어 급수가 전부 막힙니다. 2026-09-29 재부팅 때 실제로 그랬습니다.
+- **카메라** — LaunchAgent `com.namo.cam`(`gateway/com.namo.cam.plist`)이
+  로그인하면 `cam.sh`를 띄우고, 끝나면 15초 안에 되살립니다. 로그는
+  `~/Library/Logs/namo-cam.log`.
 - **ESP32** — WiFi·MQTT 모두 무한 재시도
 - **카메라 ffmpeg** — `cam.sh`가 세그먼트 갱신을 보고 재시작
 - **브라우저 재생** — 끊기면 스스로 다시 붙음
 
 ### 손이 필요한 것
 
-**카메라 프로세스 전체.** macOS 카메라 권한이 프로세스를 띄운 앱에
-붙어서, 자동화 도구로는 띄울 수 없습니다. 맥 터미널에서 직접 실행합니다.
+**카메라 권한을 처음 줄 때.** 로그인 세션의 LaunchAgent는 카메라·마이크
+권한 창을 화면에 띄울 수 있습니다. 처음 한 번 "허용"을 누르면 그 뒤로는
+재부팅해도 스스로 뜹니다. 권한을 준 적 없는 채로 뜨면 첫 세그먼트를
+기다리며 조용히 멈추므로, 스트림이 안 나오면 화면에 권한 창이 떠 있는지
+봅니다. (SSH로 띄우면 창을 띄울 수 없어 같은 식으로 멈춥니다.)
+
+LaunchAgent를 다시 올리려면:
 
 ```bash
-cd ~/project/namo-firmware && ./scripts/cam.sh
+launchctl bootout gui/$(id -u)/com.namo.cam
+cp gateway/com.namo.cam.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.namo.cam.plist
 ```
+
+손으로 띄울 때(`./scripts/cam.sh`)는 먼저 LaunchAgent를 내려야 합니다.
+둘이 같이 뜨면 포트를 두고 부딪힙니다.
 
 **웹캠이 프레임을 멈췄을 때.** `cam.sh`가 ffmpeg을 몇 번이고 다시
 띄워도 화면이 돌아오지 않으면 카메라 쪽입니다. USB를 뽑았다 꽂습니다.
@@ -185,9 +201,6 @@ Wi-Fi 설정에서 이 네트워크의 "비공개 Wi-Fi 주소"는 끄거나 고
 
 **OTA 펌웨어 업데이트가 없습니다.** 펌웨어를 고치려면 USB를 꽂아야
 합니다. 파티션 재구성과 인증이 필요해 미뤘습니다.
-
-**카메라 자동 시작이 없습니다.** 권한 문제이며, 꺼져도 급수에는 지장이
-없어 후순위입니다.
 
 ## 5. 재배 기록
 
