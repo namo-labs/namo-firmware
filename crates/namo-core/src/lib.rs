@@ -5,6 +5,7 @@ pub mod command;
 pub mod daily;
 pub mod dose;
 pub mod float;
+pub mod link;
 pub mod mibeacon;
 pub mod safety;
 pub mod telemetry;
