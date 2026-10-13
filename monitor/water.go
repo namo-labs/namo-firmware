@@ -18,6 +18,12 @@ import (
 // 83%까지 올라가 과습 영역에 들어갔습니다.
 var allowedDoses = map[int]bool{50: true, 100: true, 200: true}
 
+// publishTimeout은 발행을 브로커가 확인해 주기를 기다리는 한계입니다.
+//
+// paho 토큰은 브로커가 응답하지 않으면 재접속할 때까지 끝나지 않습니다.
+// 한계를 두지 않으면 요청이 영영 돌아오지 않아 웹이 "요청 중…"에서 멈춥니다.
+var publishTimeout = 5 * time.Second
+
 // pending은 보낸 급수 명령의 결과를 기다리는 곳입니다.
 //
 // 급수는 비동기입니다. 명령을 MQTT로 보내고, 결과는 장치가 별도 토픽으로
@@ -112,7 +118,10 @@ func waterHandler(client mqtt.Client, deviceID string, p *pending, events *Event
 			return
 		}
 
-		if !client.IsConnected() {
+		// IsConnected가 아니라 IsConnectionOpen을 봅니다. 자동 재접속을 켜 두면
+		// 브로커가 죽어 있는 동안에도 IsConnected는 true라, 명령이 큐에만
+		// 쌓이고 결과는 오지 않습니다.
+		if !client.IsConnectionOpen() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"error": "브로커에 연결돼 있지 않습니다",
 			})
@@ -142,8 +151,17 @@ func waterHandler(client mqtt.Client, deviceID string, p *pending, events *Event
 		ch := p.add(id)
 		defer p.remove(id)
 
-		if tok := client.Publish(topicCmd, 1, false, payload); tok.Wait() && tok.Error() != nil {
-			log.Printf("급수 명령 발행 실패: %v", tok.Error())
+		tok := client.Publish(topicCmd, 1, false, payload)
+		if !tok.WaitTimeout(publishTimeout) {
+			// 명령이 큐에 남아 늦게 나갈 수 있지만, 장치가 TTL로 버립니다(S8).
+			log.Printf("급수 명령 발행 확인 시간 초과 (id=%s)", id)
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"error": "브로커가 응답하지 않습니다",
+			})
+			return
+		}
+		if err := tok.Error(); err != nil {
+			log.Printf("급수 명령 발행 실패: %v", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error": "명령을 보내지 못했습니다",
 			})

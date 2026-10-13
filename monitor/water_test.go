@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 func TestDeliver는기다리는쪽에전달(t *testing.T) {
@@ -178,4 +180,117 @@ func postWater(t *testing.T, headers map[string]string, body string) *httptest.R
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	return rec
+}
+
+// fakeClient는 paho 클라이언트의 연결 상태와 발행만 흉내 냅니다.
+//
+// IsConnected는 재접속 중에도 true를 줍니다(AutoReconnect일 때). 브로커가
+// 죽은 동안의 실제 동작이 이것이라, 테스트도 같게 둡니다.
+type fakeClient struct {
+	mqtt.Client // 쓰지 않는 메서드는 nil이라 부르면 바로 패닉합니다.
+	open        bool
+	token       mqtt.Token
+	published   int
+}
+
+func (f *fakeClient) IsConnected() bool      { return true }
+func (f *fakeClient) IsConnectionOpen() bool { return f.open }
+func (f *fakeClient) Publish(string, byte, bool, interface{}) mqtt.Token {
+	f.published++
+	return f.token
+}
+
+// hangToken은 브로커가 응답하지 않을 때의 발행 토큰입니다. 재접속 전까지
+// 끝나지 않습니다.
+type hangToken struct{}
+
+func (hangToken) Wait() bool                       { select {} }
+func (hangToken) WaitTimeout(d time.Duration) bool { time.Sleep(d); return false }
+func (hangToken) Done() <-chan struct{}            { return nil }
+func (hangToken) Error() error                     { return nil }
+
+func serveWithin(t *testing.T, h func(http.ResponseWriter, *http.Request), req *http.Request, limit time.Duration) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h(rec, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+		return rec
+	case <-time.After(limit):
+		t.Fatalf("핸들러가 %v 안에 끝나지 않았습니다 (웹이 \"요청 중…\"에서 멈춥니다)", limit)
+		return nil
+	}
+}
+
+func postJSON(path, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "http://example.test"+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	return req
+}
+
+// 브로커가 죽어 paho가 재접속 중이면 IsConnected는 true지만 연결은 열려 있지
+// 않습니다. 이때 발행하면 명령이 큐에만 쌓이고 결과를 영영 못 받습니다.
+func TestWater는재접속중이면발행하지않고거부(t *testing.T) {
+	c := &fakeClient{open: false, token: hangToken{}}
+	h := waterHandler(c, "pilot01", newPending(), NewEventStore(t.TempDir(), 86400))
+
+	rec := serveWithin(t, h, postJSON("/api/water", `{"dose_ml":100}`), 2*time.Second)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("코드 = %d, 기대 503", rec.Code)
+	}
+	if c.published != 0 {
+		t.Fatalf("연결이 열려 있지 않은데 %d번 발행했습니다", c.published)
+	}
+}
+
+// 연결은 열려 있는데 브로커가 발행을 확인해 주지 않아도 무한정 기다리지
+// 않아야 합니다.
+func TestWater는발행확인이없으면제한시간에끝난다(t *testing.T) {
+	old := publishTimeout
+	publishTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { publishTimeout = old })
+
+	c := &fakeClient{open: true, token: hangToken{}}
+	h := waterHandler(c, "pilot01", newPending(), NewEventStore(t.TempDir(), 86400))
+
+	rec := serveWithin(t, h, postJSON("/api/water", `{"dose_ml":100}`), 2*time.Second)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("코드 = %d, 기대 504", rec.Code)
+	}
+}
+
+func TestUnlock은재접속중이면발행하지않고거부(t *testing.T) {
+	c := &fakeClient{open: false, token: hangToken{}}
+	h := unlockHandler(c, "pilot01", &state{})
+
+	rec := serveWithin(t, h, postJSON("/api/unlock", `{}`), 2*time.Second)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("코드 = %d, 기대 503", rec.Code)
+	}
+	if c.published != 0 {
+		t.Fatalf("연결이 열려 있지 않은데 %d번 발행했습니다", c.published)
+	}
+}
+
+func TestUnlock은발행확인이없으면제한시간에끝난다(t *testing.T) {
+	old := publishTimeout
+	publishTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { publishTimeout = old })
+
+	c := &fakeClient{open: true, token: hangToken{}}
+	h := unlockHandler(c, "pilot01", &state{})
+
+	rec := serveWithin(t, h, postJSON("/api/unlock", `{}`), 2*time.Second)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("코드 = %d, 기대 504", rec.Code)
+	}
 }

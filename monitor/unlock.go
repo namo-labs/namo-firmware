@@ -33,7 +33,8 @@ func unlockHandler(client mqtt.Client, deviceID string, st *state) func(http.Res
 		if err := guardWrite(w, r); err != nil {
 			return
 		}
-		if !client.IsConnected() {
+		// 재접속 중에도 IsConnected는 true라 연결이 열렸는지를 봅니다.
+		if !client.IsConnectionOpen() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"error": "브로커에 연결돼 있지 않습니다",
 			})
@@ -51,8 +52,16 @@ func unlockHandler(client mqtt.Client, deviceID string, st *state) func(http.Res
 
 		id := newID()
 		payload, _ := json.Marshal(map[string]any{"id": id})
-		if tok := client.Publish(topic, 1, false, payload); tok.Wait() && tok.Error() != nil {
-			log.Printf("unlock 발행 실패: %v", tok.Error())
+		tok := client.Publish(topic, 1, false, payload)
+		if !tok.WaitTimeout(publishTimeout) {
+			log.Printf("unlock 발행 확인 시간 초과 (id=%s)", id)
+			writeJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"error": "브로커가 응답하지 않습니다",
+			})
+			return
+		}
+		if err := tok.Error(); err != nil {
+			log.Printf("unlock 발행 실패: %v", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error": "명령을 보내지 못했습니다",
 			})
