@@ -44,6 +44,8 @@
 | `GET /namo/api/events?limit=N` | 사건 기록 |
 | `POST /namo/api/water` | 급수 `{"dose_ml":100}` |
 | `POST /namo/api/unlock` | 잠금 해제 `{}` |
+| `GET /namo/api/auto` | 자동급수 상태 |
+| `POST /namo/api/auto` | 자동급수 켜기/끄기 `{"enabled":true}` |
 | `GET /namo/cam/stream.m3u8` | 카메라 HLS |
 | `GET /namo/cam/snapshot.jpg` | 현재 프레임 (5초 갱신) |
 
@@ -62,7 +64,7 @@
 `namo-monitor`를 거치지 않으므로, "Bearer가 붙어 있으면 통과"로 두면 아무
 값이나 카메라를 볼 수 있습니다.
 
-상태를 바꾸는 요청(`water`·`unlock`)은 `Content-Type: application/json`이
+상태를 바꾸는 요청(`water`·`unlock`·`auto`)은 `Content-Type: application/json`이
 필요합니다. HTML form은 그 값을 만들 수 없어, 남의 페이지에 숨긴 폼으로
 급수를 거는 길이 막힙니다.
 
@@ -165,6 +167,22 @@ Wi-Fi 설정에서 이 네트워크의 "비공개 Wi-Fi 주소"는 끄거나 고
 되살아나므로 대부분 알림 없이 지나갑니다.
 
 봇은 portfolio와 같은 것을 씁니다. `DRY_PCT`로 기준을 조정합니다.
+
+### 자동급수
+
+켜 두면 흙수분이 `DRY_PCT` 아래로 내려갈 때 `namo-monitor`가 100mL를
+스스로 주고 텔레그램으로 알립니다. 30분 뒤에도 마른 채면 다시 줍니다.
+이때는 "흙이 말랐습니다" 알림 대신 급수 알림이 갑니다. 규칙은
+`pilot-design.md` §7에 있습니다.
+
+화면 급수 카드의 스위치로 켜고 끕니다. 기본은 꺼짐이고, 바꾼 값은
+`DATA_DIR/auto.json`에 남아 재시작해도 유지됩니다.
+
+**"자동급수를 멈췄습니다"가 오면** 물을 줬는데 15분 동안 흙수분이 오르지
+않았거나 장치가 하드웨어 오류를 낸 것입니다. 모터 선 접촉과 센서가 흙에
+꽂혀 있는지부터 봅니다. 고친 뒤 화면에서 "다시 켜기"를 누르거나, 손으로
+물을 줘 흙이 60% 넘게 젖으면 스스로 재개합니다. 멈춤은 재시작해도
+풀리지 않습니다.
 
 ## 4. 남은 일
 
