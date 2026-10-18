@@ -12,6 +12,11 @@ var t0 = time.Date(2026, 10, 18, 12, 0, 0, 0, time.Local)
 
 func newTestAuto(t *testing.T, on bool) (*autoWaterer, *fakeSender) {
 	t.Helper()
+	return newTestAutoIn(t, t.TempDir(), on)
+}
+
+func newTestAutoIn(t *testing.T, dir string, on bool) (*autoWaterer, *fakeSender) {
+	t.Helper()
 	f := &fakeSender{}
 	n := &Notifier{
 		token:  "test",
@@ -19,7 +24,7 @@ func newTestAuto(t *testing.T, on bool) (*autoWaterer, *fakeSender) {
 		active: map[string]time.Time{},
 		hook:   func(text string) { f.sent = append(f.sent, text) },
 	}
-	return newAutoWaterer(n, t.TempDir(), on, 50, 100), f
+	return newAutoWaterer(n, dir, on, 50, 100), f
 }
 
 // okView는 물을 주기에 모든 조건이 맞는 텔레메트리입니다. 테스트마다
@@ -276,8 +281,24 @@ func TestAuto는멈춘뒤흙이젖으면재개한다(t *testing.T) {
 	}
 }
 
-// 배선을 고친 뒤 화면에서 다시 켜면 흙이 젖기를 기다리지 않고 재개합니다.
-func TestAuto는다시켜면멈춤이풀린다(t *testing.T) {
+// 배선을 고친 뒤 화면에서 "다시 켜기"를 누르면 흙이 젖기를 기다리지 않고
+// 재개합니다.
+func TestAuto는다시켜기를누르면멈춤이풀린다(t *testing.T) {
+	a, _ := newTestAuto(t, true)
+	waterOnce(t, a, 44)
+	a.decide(okView(44), t0.Add(16*time.Minute)) // 멈춤
+
+	if err := a.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.decide(okView(44), t0.Add(31*time.Minute)); !ok {
+		t.Fatal("다시 켰는데 주지 않았습니다")
+	}
+}
+
+// 이미 켜져 있는데 "켜기"가 다시 오면 아무것도 바꾸지 않습니다. 앱이 상태를
+// 맞추려고 같은 값을 보낼 때 멈춤이 사람 확인 없이 풀리면 안 됩니다.
+func TestAuto는같은값으로켜도멈춤을풀지않는다(t *testing.T) {
 	a, _ := newTestAuto(t, true)
 	waterOnce(t, a, 44)
 	a.decide(okView(44), t0.Add(16*time.Minute)) // 멈춤
@@ -285,8 +306,64 @@ func TestAuto는다시켜면멈춤이풀린다(t *testing.T) {
 	if err := a.SetEnabled(true); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := a.decide(okView(44), t0.Add(31*time.Minute)); !ok {
-		t.Fatal("다시 켰는데 주지 않았습니다")
+	if _, ok := a.decide(okView(44), t0.Add(31*time.Minute)); ok {
+		t.Fatal("같은 값으로 켰을 뿐인데 멈춤이 풀렸습니다")
+	}
+
+	// 껐다 켜는 것은 사람이 다시 맡긴 것입니다.
+	_ = a.SetEnabled(false)
+	_ = a.SetEnabled(true)
+	if _, ok := a.decide(okView(44), t0.Add(32*time.Minute)); !ok {
+		t.Fatal("껐다 켰는데 멈춤이 그대로입니다")
+	}
+}
+
+// 멈춤은 안전장치입니다. 배포로 재시작했다고 풀리면, 센서가 빠진 채로
+// 재시작할 때마다 물이 나갑니다.
+func TestAuto는멈춤을재시작해도기억한다(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAutoIn(t, dir, true)
+	waterOnce(t, a, 44)
+	a.decide(okView(44), t0.Add(16*time.Minute)) // 멈춤
+
+	b, _ := newTestAutoIn(t, dir, true)
+	if _, ok := b.decide(okView(44), t0.Add(2*time.Hour)); ok {
+		t.Fatal("재시작하자 멈춤이 풀렸습니다")
+	}
+	if !b.status().Stopped {
+		t.Fatal("상태에 멈춤이 보이지 않습니다")
+	}
+}
+
+// 장치가 하드웨어 오류를 내면 사람이 볼 때까지 멈춥니다. 30분마다 같은
+// 오류를 다시 부를 이유가 없습니다.
+func TestAuto는하드웨어오류면멈춘다(t *testing.T) {
+	a, f := newTestAuto(t, true)
+	failed := func(int) (waterResult, error) {
+		return waterResult{Status: "failed", Reason: "hardware_error"}, nil
+	}
+
+	p, _ := a.decide(okView(44), t0)
+	a.execute(p, failed)
+
+	if countWith(f.sent, "자동급수를 멈췄습니다") != 1 || countWith(f.sent, "하드웨어 오류") != 1 {
+		t.Fatalf("알림 = %v", f.sent)
+	}
+	if _, ok := a.decide(okView(44), t0.Add(31*time.Minute)); ok {
+		t.Fatal("하드웨어 오류 뒤에 다시 줬습니다")
+	}
+}
+
+// 못 주던 이유가 풀렸다가 나중에 다른 이유로 막히면 다시 알려야 합니다.
+func TestAuto는못주던이유가풀리면다음에다시알린다(t *testing.T) {
+	a, f := newTestAuto(t, true)
+
+	a.decide(withReservoir(okView(44), "empty"), t0)
+	a.decide(okView(55), t0.Add(time.Hour)) // 물통을 채우고 손으로 줬습니다
+	a.decide(withToday(okView(44), 450), t0.Add(3*time.Hour))
+
+	if len(f.sent) != 2 || !strings.Contains(f.sent[1], "오늘 한도") {
+		t.Fatalf("알림 = %v, 기대 두 번째가 한도", f.sent)
 	}
 }
 
@@ -356,7 +433,19 @@ func TestAuto는켜짐을파일에남긴다(t *testing.T) {
 	}
 }
 
-func TestAuto는저장하지못하면바꾸지않는다(t *testing.T) {
+// 끄는 것은 물을 멈추는 쪽이라 저장하지 못해도 먹어야 합니다.
+func TestAuto는저장하지못해도끄기는먹는다(t *testing.T) {
+	a := newAutoWaterer(nil, "/없는/경로", true, 50, 100)
+
+	if err := a.SetEnabled(false); err == nil {
+		t.Fatal("저장하지 못했는데 오류가 없습니다")
+	}
+	if a.Enabled() {
+		t.Fatal("저장하지 못했다고 끄기가 먹지 않았습니다")
+	}
+}
+
+func TestAuto는저장하지못하면켜지않는다(t *testing.T) {
 	a := newAutoWaterer(nil, "/없는/경로", false, 50, 100)
 
 	if err := a.SetEnabled(true); err == nil {
@@ -413,6 +502,19 @@ func TestAutoAPI는enabled가없으면거부(t *testing.T) {
 	}
 }
 
+func TestAutoAPI는resume으로멈춤을푼다(t *testing.T) {
+	a, _ := newTestAuto(t, true)
+	waterOnce(t, a, 44)
+	a.decide(okView(44), t0.Add(16*time.Minute)) // 멈춤
+	rec := httptest.NewRecorder()
+
+	autoHandler(a)(rec, postJSON("/api/auto", `{"resume":true}`))
+
+	if rec.Code != http.StatusOK || a.status().Stopped {
+		t.Fatalf("코드 = %d, 멈춤 = %v; 기대 200, 풀림", rec.Code, a.status().Stopped)
+	}
+}
+
 // 자동급수가 켜져 있으면 "흙이 말랐습니다"는 보내지 않습니다. 급수 알림과
 // 같은 일을 두 번 알리게 됩니다.
 func TestDry경보는자동급수가켜져있으면보내지않는다(t *testing.T) {
@@ -428,6 +530,20 @@ func TestDry경보는자동급수가켜져있으면보내지않는다(t *testing
 
 // 브로커가 끊겨 명령이 아예 나가지 않았으면 "물이 나갔는지 모른다"고
 // 하면 안 됩니다. 사람이 펌프를 확인하러 갈 이유가 없습니다.
+// 브로커가 발행을 확인해 주지 않았어도 명령은 늦게 나갈 수 있습니다.
+// TTL(30초) 안에 닿으면 물이 나갑니다.
+func TestAuto는발행확인이없으면나갔는지모르는것으로친다(t *testing.T) {
+	a, f := newTestAuto(t, true)
+	silent := func(int) (waterResult, error) { return waterResult{}, errBrokerSilent }
+
+	p, _ := a.decide(okView(44), t0)
+	a.execute(p, silent)
+
+	if countWith(f.sent, "나갔는지 모르므로") != 1 {
+		t.Fatalf("알림 = %v", f.sent)
+	}
+}
+
 func TestAuto는보내지못한것과결과를모르는것을구분한다(t *testing.T) {
 	a, f := newTestAuto(t, true)
 	down := func(int) (waterResult, error) { return waterResult{}, errBrokerDown }

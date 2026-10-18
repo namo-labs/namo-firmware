@@ -107,8 +107,9 @@ type autoWaterer struct {
 	before     int
 	peak       int
 
-	// 줬는데 흙수분이 오르지 않아 멈췄습니다. 흙이 충분히 젖거나
-	// 사람이 다시 켜야 풀립니다.
+	// 줬는데 흙수분이 오르지 않았거나 장치가 하드웨어 오류를 내서
+	// 멈췄습니다. 흙이 충분히 젖거나 사람이 다시 맡겨야 풀립니다.
+	// 안전장치라 파일에 남깁니다. 재시작했다고 풀리면 안 됩니다.
 	stopped bool
 	// 지금 주지 못하는 이유(사유 코드). 상태를 보여주기 위한 것입니다.
 	hold string
@@ -116,9 +117,10 @@ type autoWaterer struct {
 
 type autoSaved struct {
 	Enabled bool `json:"enabled"`
+	Stopped bool `json:"stopped"`
 }
 
-// newAutoWaterer는 저장된 켜짐 여부를 읽습니다. 파일이 없을 때만
+// newAutoWaterer는 저장된 켜짐·멈춤을 읽습니다. 파일이 없을 때만
 // defaultOn을 씁니다. 화면에서 끈 것이 재시작으로 되살아나면 안 됩니다.
 func newAutoWaterer(n *Notifier, dir string, defaultOn bool, dryPct, doseML int) *autoWaterer {
 	a := &autoWaterer{
@@ -131,7 +133,7 @@ func newAutoWaterer(n *Notifier, dir string, defaultOn bool, dryPct, doseML int)
 	if data, err := os.ReadFile(a.path); err == nil {
 		var saved autoSaved
 		if err := json.Unmarshal(data, &saved); err == nil {
-			a.enabled = saved.Enabled
+			a.enabled, a.stopped = saved.Enabled, saved.Stopped
 		}
 	}
 	return a
@@ -143,24 +145,38 @@ func (a *autoWaterer) Enabled() bool {
 	return a.enabled
 }
 
-// SetEnabled는 켜고 끕니다. 저장하지 못하면 바꾸지 않습니다. 화면에는
-// 바뀐 것으로 보이는데 재시작하면 되돌아가는 편이 더 위험합니다.
-//
-// 켜든 끄든 멈춤과 지난 경보는 풉니다. 사람이 상황을 보고 다시 맡긴
-// 것이기 때문입니다. 마지막으로 보낸 시각은 그대로 둬, 껐다 켜는 것으로
-// 30분 간격을 건너뛰지 못하게 합니다.
-func (a *autoWaterer) SetEnabled(on bool) error {
-	data, err := json.Marshal(autoSaved{Enabled: on})
+// saveLocked는 켜짐·멈춤을 파일에 남깁니다. a.mu를 잡은 채로 부릅니다.
+func (a *autoWaterer) saveLocked() error {
+	data, err := json.Marshal(autoSaved{Enabled: a.enabled, Stopped: a.stopped})
 	if err != nil {
 		return err
 	}
-	if err := saveJSON(a.path, data); err != nil {
+	return saveJSON(a.path, data)
+}
+
+// SetEnabled는 켜고 끕니다.
+//
+// 값이 그대로면 아무것도 바꾸지 않습니다. 앱이 상태를 맞추려고 같은 값을
+// 보냈다고 멈춤이 풀리면 안 됩니다. 값이 바뀌면 사람이 상황을 보고 다시
+// 맡긴 것이므로 멈춤과 지난 경보를 풉니다. 마지막으로 보낸 시각은 그대로
+// 둬, 껐다 켜는 것으로 30분 간격을 건너뛰지 못하게 합니다.
+//
+// 저장하지 못하면 켜기는 거부하고 끄기는 그대로 먹입니다. 켜졌다고
+// 보이는데 재시작하면 꺼지는 것보다, 물을 멈추지 못하는 쪽이 더 나쁩니다.
+func (a *autoWaterer) SetEnabled(on bool) error {
+	a.mu.Lock()
+	if a.enabled == on {
+		a.mu.Unlock()
+		return nil
+	}
+	prevStopped := a.stopped
+	a.enabled, a.stopped = on, false
+	err := a.saveLocked()
+	if err != nil && on {
+		a.enabled, a.stopped = false, prevStopped
+		a.mu.Unlock()
 		return err
 	}
-
-	a.mu.Lock()
-	a.enabled = on
-	a.stopped = false
 	a.checking = false
 	a.hold = ""
 	a.mu.Unlock()
@@ -168,7 +184,35 @@ func (a *autoWaterer) SetEnabled(on bool) error {
 	for _, key := range []string{alertAutoHold, alertAutoFail, alertAutoStopped} {
 		a.n.Clear(key, "")
 	}
-	return nil
+	return err
+}
+
+// Resume은 멈춘 자동급수를 다시 맡깁니다. 배선이나 센서를 확인한 뒤
+// 화면에서 "다시 켜기"를 누를 때 부릅니다. 저장하지 못해도 풀되, 재시작하면
+// 다시 멈춘 상태로 돌아갑니다. 안전한 쪽으로 돌아가는 것이라 막지 않습니다.
+func (a *autoWaterer) Resume() error {
+	a.mu.Lock()
+	if !a.stopped {
+		a.mu.Unlock()
+		return nil
+	}
+	a.stopped = false
+	a.checking = false
+	err := a.saveLocked()
+	a.mu.Unlock()
+
+	a.n.Clear(alertAutoStopped, "")
+	return err
+}
+
+// stopLocked는 자동급수를 멈추고 남깁니다. a.mu를 잡은 채로 부릅니다.
+func (a *autoWaterer) stopLocked(text string, out *outbox) {
+	a.checking = false
+	a.stopped = true
+	if err := a.saveLocked(); err != nil {
+		log.Printf("자동급수 멈춤을 저장하지 못했습니다: %v", err)
+	}
+	out.add(func() { a.n.Raise(alertAutoStopped, text) })
 }
 
 // outbox는 잠금을 놓은 뒤에 보낼 알림을 모읍니다. 텔레그램이 느리면 그동안
@@ -207,6 +251,12 @@ func (a *autoWaterer) decide(v autoView, now time.Time) (autoPlan, bool) {
 	}
 	if m >= a.dryPct {
 		a.hold = ""
+		// 막던 이유가 풀렸으면 보류 경보를 내려, 다음에 다른 이유로
+		// 막히면 다시 알리게 합니다. 이유가 그대로면 경계에서 흔들려도
+		// 다시 알리지 않습니다.
+		if a.blocked(v) == "" {
+			out.add(func() { a.n.Clear(alertAutoHold, "") })
+		}
 	}
 	if m >= a.dryPct+autoResumeMargin {
 		a.resume(m, &out)
@@ -255,7 +305,7 @@ func (a *autoWaterer) blocked(v autoView) string {
 		return "leak_stale"
 	case v.Locked == nil || *v.Locked:
 		return "locked"
-	case *v.Today+a.doseML > deviceDailyLimitML:
+	case v.Today != nil && *v.Today+a.doseML > deviceDailyLimitML:
 		return "daily_limit"
 	}
 	return ""
@@ -280,8 +330,6 @@ func (a *autoWaterer) checkEffect(m int, fresh bool, now time.Time, out *outbox)
 		return
 	}
 
-	a.checking = false
-	a.stopped = true
 	text := strings.Join([]string{
 		"⚠️ <b>자동급수를 멈췄습니다</b>",
 		"",
@@ -290,15 +338,24 @@ func (a *autoWaterer) checkEffect(m int, fresh bool, now time.Time, out *outbox)
 		"물이 실제로 나가지 않았거나 센서가 흙에서 빠졌을 수 있습니다.",
 		"펌프 배선과 센서를 확인하세요.",
 		"",
-		fmt.Sprintf("흙이 %d%% 이상으로 젖거나 화면에서 자동급수를 다시 켜면 재개합니다.", a.dryPct+autoResumeMargin),
+		a.resumeHint(),
 	}, "\n")
-	out.add(func() { a.n.Raise(alertAutoStopped, text) })
+	a.stopLocked(text, out)
+}
+
+func (a *autoWaterer) resumeHint() string {
+	return fmt.Sprintf("흙이 %d%% 이상으로 젖거나 화면에서 \"다시 켜기\"를 누르면 재개합니다.", a.dryPct+autoResumeMargin)
 }
 
 // resume은 흙이 충분히 젖었을 때 멈춤과 보류를 풉니다.
 func (a *autoWaterer) resume(m int, out *outbox) {
 	wasStopped := a.stopped
 	a.stopped = false
+	if wasStopped {
+		if err := a.saveLocked(); err != nil {
+			log.Printf("자동급수 재개를 저장하지 못했습니다: %v", err)
+		}
+	}
 	out.add(func() {
 		a.n.Clear(alertAutoHold, "")
 		if wasStopped {
@@ -318,12 +375,14 @@ func (a *autoWaterer) execute(p autoPlan, send func(dose int) (waterResult, erro
 	defer a.mu.Unlock()
 
 	switch {
-	case errors.Is(err, errNoResult):
+	case errors.Is(err, errNoResult), errors.Is(err, errBrokerSilent):
+		// 발행을 확인받지 못한 명령도 늦게 나가 TTL 안에 닿을 수 있습니다.
 		log.Printf("자동급수 결과 없음: %v", err)
 		text := strings.Join([]string{
 			"⚠️ <b>자동급수 결과를 받지 못했습니다</b>",
 			"",
-			"명령은 나갔습니다. 물이 나갔는지 모르므로 30분 뒤에 다시 봅니다.",
+			err.Error() + ".",
+			"물이 나갔는지 모르므로 30분 뒤에 다시 봅니다.",
 		}, "\n")
 		out.add(func() { a.n.Raise(alertAutoFail, text) })
 
@@ -354,6 +413,18 @@ func (a *autoWaterer) execute(p autoPlan, send func(dose int) (waterResult, erro
 			a.n.Clear(alertAutoFail, "")
 			a.n.Notify(text)
 		})
+
+	case res.Status == "failed":
+		// 같은 오류를 30분마다 다시 부를 이유가 없습니다. 사람이 봐야 합니다.
+		log.Printf("자동급수 하드웨어 오류: %s", res.Reason)
+		a.stopLocked(strings.Join([]string{
+			"⚠️ <b>자동급수를 멈췄습니다</b>",
+			"",
+			"장치가 " + reasonLabel(res.Reason) + "라고 답했습니다.",
+			"펌프와 배선을 확인하세요.",
+			"",
+			a.resumeHint(),
+		}, "\n"), &out)
 
 	default:
 		log.Printf("자동급수 %s: %s (%dmL)", res.Status, res.Reason, res.EstimatedML)
@@ -405,7 +476,7 @@ type autoStatus struct {
 	Enabled bool `json:"enabled"`
 	DryPct  int  `json:"dry_pct"`
 	DoseML  int  `json:"dose_ml"`
-	// 줬는데 흙수분이 오르지 않아 멈췄습니다.
+	// 줬는데 흙수분이 오르지 않았거나 하드웨어 오류로 멈췄습니다.
 	Stopped bool `json:"stopped"`
 	// 지금 주지 못하는 이유. 사유 코드입니다(water/result의 reason과 같음).
 	Hold       string `json:"hold,omitempty"`
@@ -439,23 +510,34 @@ func autoHandler(a *autoWaterer) func(http.ResponseWriter, *http.Request) {
 			if err := guardWrite(w, r); err != nil {
 				return
 			}
+			// 같은 값의 enabled는 아무것도 바꾸지 않습니다. 멈춘 것을 다시
+			// 맡기려면 resume을 따로 보냅니다.
 			var req struct {
 				Enabled *bool `json:"enabled"`
+				Resume  bool  `json:"resume"`
 			}
-			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil || req.Enabled == nil {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil || (req.Enabled == nil && !req.Resume) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{
-					"error": `{"enabled": true|false}로 보내야 합니다`,
+					"error": `{"enabled": true|false} 또는 {"resume": true}로 보내야 합니다`,
 				})
 				return
 			}
-			if err := a.SetEnabled(*req.Enabled); err != nil {
+			var err error
+			if req.Enabled != nil {
+				err = a.SetEnabled(*req.Enabled)
+				log.Printf("자동급수 켜짐 요청: %v → 지금 %v", *req.Enabled, a.Enabled())
+			}
+			if err == nil && req.Resume {
+				err = a.Resume()
+				log.Print("자동급수 다시 맡김")
+			}
+			if err != nil {
 				log.Printf("자동급수 설정 저장 실패: %v", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{
-					"error": "설정을 저장하지 못했습니다",
+					"error": "설정을 저장하지 못했습니다. 재시작하면 이전 값으로 돌아갑니다",
 				})
 				return
 			}
-			log.Printf("자동급수 켜짐: %v", *req.Enabled)
 			writeJSON(w, http.StatusOK, a.status())
 		default:
 			w.Header().Set("Allow", "GET, POST")
