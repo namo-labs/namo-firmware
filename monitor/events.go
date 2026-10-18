@@ -33,7 +33,7 @@ type Event struct {
 	Reason string `json:"r,omitempty"`
 	ML     int    `json:"ml,omitempty"`
 	PumpMS int    `json:"pms,omitempty"`
-	Source string `json:"src,omitempty"` // web이면 이 화면에서 보낸 것
+	Source string `json:"src,omitempty"` // web이면 이 화면에서, auto면 자동급수가 보낸 것
 
 	// 상태 전이에서 씁니다.
 	From string `json:"f,omitempty"`

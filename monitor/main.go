@@ -328,8 +328,10 @@ func handleWaterResult(payload []byte, store *Store, events *EventStore, pend *p
 	// **거부와 중단도 남깁니다.** 왜 물이 안 나갔는지는 성공 기록만으로는
 	// 알 수 없고, 그걸 알아야 쿨다운인지 물통이 빈 것인지 되짚습니다.
 	src := ""
-	if strings.HasPrefix(r.ID, "web") {
-		src = "web"
+	for _, p := range []string{"web", "auto"} {
+		if strings.HasPrefix(r.ID, p) {
+			src = p
+		}
 	}
 	events.Add(Event{
 		TS: ts, Kind: KindWater,

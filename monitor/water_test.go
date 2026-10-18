@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,7 +80,7 @@ func TestDeliver는중복에도막히지않는다(t *testing.T) {
 func TestNewID는매번다르다(t *testing.T) {
 	seen := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		id := newID()
+		id := newID("web")
 		if seen[id] {
 			t.Fatalf("중복 id: %s", id)
 		}
@@ -191,14 +193,29 @@ type fakeClient struct {
 	open        bool
 	token       mqtt.Token
 	published   int
+	lastPayload []byte
+	// 발행 직후에 부릅니다. 장치가 결과를 돌려주는 것을 흉내 낼 때 씁니다.
+	onPublish func(payload []byte)
 }
 
 func (f *fakeClient) IsConnected() bool      { return true }
 func (f *fakeClient) IsConnectionOpen() bool { return f.open }
-func (f *fakeClient) Publish(string, byte, bool, interface{}) mqtt.Token {
+func (f *fakeClient) Publish(_ string, _ byte, _ bool, payload interface{}) mqtt.Token {
 	f.published++
+	f.lastPayload, _ = payload.([]byte)
+	if f.onPublish != nil {
+		f.onPublish(f.lastPayload)
+	}
 	return f.token
 }
+
+// doneToken은 브로커가 발행을 바로 확인해 준 토큰입니다.
+type doneToken struct{}
+
+func (doneToken) Wait() bool                     { return true }
+func (doneToken) WaitTimeout(time.Duration) bool { return true }
+func (doneToken) Done() <-chan struct{}          { ch := make(chan struct{}); close(ch); return ch }
+func (doneToken) Error() error                   { return nil }
 
 // hangToken은 브로커가 응답하지 않을 때의 발행 토큰입니다. 재접속 전까지
 // 끝나지 않습니다.
@@ -292,5 +309,74 @@ func TestUnlock은발행확인이없으면제한시간에끝난다(t *testing.T)
 
 	if rec.Code != http.StatusGatewayTimeout {
 		t.Fatalf("코드 = %d, 기대 504", rec.Code)
+	}
+}
+
+// 자동급수 결과는 사건 기록에서 웹 급수와 구분돼야 합니다. 둘이 섞이면
+// "누가 줬나"를 되짚을 수 없습니다.
+func TestWaterResult는명령출처를남긴다(t *testing.T) {
+	cases := []struct{ id, want string }{
+		{"web1772500000-1", "web"},
+		{"auto1772500000-2", "auto"},
+		{"mqttx-manual", ""},
+	}
+	for _, c := range cases {
+		events := NewEventStore(t.TempDir(), 86400)
+		store := NewStore(t.TempDir(), 60, 86400)
+		payload := `{"id":"` + c.id + `","status":"completed","estimated_ml":100,"pump_ms":4200,"finished_at":1772500005}`
+
+		handleWaterResult([]byte(payload), store, events, newPending())
+
+		e, ok := events.LastWater("completed")
+		if !ok {
+			t.Fatalf("%s: 급수 사건이 남지 않았습니다", c.id)
+		}
+		if e.Source != c.want {
+			t.Errorf("%s: 출처 = %q, 기대 %q", c.id, e.Source, c.want)
+		}
+	}
+}
+
+// 자동급수도 웹 버튼과 같은 길로 명령을 보냅니다. 장치가 돌려준 결과를
+// 그대로 받아야 거부 사유를 알릴 수 있습니다.
+func TestSendWater는장치결과를돌려준다(t *testing.T) {
+	p := newPending()
+	c := &fakeClient{open: true, token: doneToken{}}
+	c.onPublish = func([]byte) {
+		p.deliver("auto1-1", json.RawMessage(`{"id":"auto1-1","status":"completed","estimated_ml":100}`))
+	}
+
+	raw, err := sendWater(context.Background(), c, "pilot01", p, "auto1-1", 100)
+	if err != nil {
+		t.Fatalf("오류 = %v", err)
+	}
+	if !strings.Contains(string(raw), `"completed"`) {
+		t.Fatalf("결과 = %s", raw)
+	}
+
+	var cmd struct {
+		ID     string `json:"id"`
+		DoseML int    `json:"dose_ml"`
+		TTL    int    `json:"ttl_s"`
+	}
+	if err := json.Unmarshal(c.lastPayload, &cmd); err != nil {
+		t.Fatalf("명령을 읽지 못했습니다: %v", err)
+	}
+	if cmd.ID != "auto1-1" || cmd.DoseML != 100 || cmd.TTL <= 0 {
+		t.Fatalf("명령 = %+v", cmd)
+	}
+}
+
+// 결과가 오지 않으면 무한정 기다리지 않고, 결과를 못 받았다고 구분해서
+// 알려야 합니다. 물이 나갔을 수도 있어 곧바로 다시 보내면 안 되는 경우입니다.
+func TestSendWater는결과가없으면제한시간에끝난다(t *testing.T) {
+	old := resultTimeout
+	resultTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { resultTimeout = old })
+
+	c := &fakeClient{open: true, token: doneToken{}}
+	_, err := sendWater(context.Background(), c, "pilot01", newPending(), "auto1-1", 100)
+	if !errors.Is(err, errNoResult) {
+		t.Fatalf("오류 = %v, 기대 errNoResult", err)
 	}
 }
