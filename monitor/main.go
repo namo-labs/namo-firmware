@@ -40,6 +40,11 @@ type config struct {
 	telegramChatID string
 	dryPct         int
 
+	// 자동급수. 켜짐 여부는 화면에서 바꾸면 DATA_DIR에 남고, 이 값은
+	// 저장된 것이 없을 때의 처음 값입니다.
+	autoWater  bool
+	autoDoseML int
+
 	// 앱이 쓸 Bearer 토큰. 비어 있으면 Bearer 요청을 거부합니다.
 	apiToken string
 
@@ -62,6 +67,10 @@ func loadConfig() config {
 		// 바질 적정이 40~60%입니다. 이 아래로 내려가면 물 줄 때가
 		// 됐다는 신호로 봅니다.
 		dryPct: int(envInt("DRY_PCT", 50)),
+		// 물이 나가는 기능이라 명시적으로 켜야 합니다.
+		autoWater: envBool("AUTO_WATER"),
+		// 이 화분은 100mL가 기준입니다. 200mL에 83%까지 올라 과습이었습니다.
+		autoDoseML: int(envInt("AUTO_DOSE_ML", 100)),
 
 		apiToken: env("API_TOKEN", ""),
 
@@ -80,6 +89,14 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
 }
 
 func envInt(key string, def int64) int64 {
@@ -156,18 +173,25 @@ func main() {
 	}
 	alerts := newAlertRules(notifier, cfg.dryPct)
 
+	if !allowedDoses[cfg.autoDoseML] {
+		log.Fatalf("AUTO_DOSE_ML=%d는 허용된 급수량이 아닙니다", cfg.autoDoseML)
+	}
+	auto := newAutoWaterer(notifier, cfg.dataDir, cfg.autoWater, cfg.dryPct, cfg.autoDoseML)
+	alerts.autoOn = auto.Enabled
+	log.Printf("자동급수 켜짐: %v (흙수분 %d%% 미만이면 %dmL)", auto.Enabled(), cfg.dryPct, cfg.autoDoseML)
+
 	if cfg.apiToken == "" {
 		log.Print("API_TOKEN이 없습니다. Bearer 토큰 요청은 모두 거부됩니다.")
 	}
 
-	client := connectMQTT(cfg, st, store, events, pend, alerts)
+	client := connectMQTT(cfg, st, store, events, pend, alerts, auto)
 
 	cam := newCameraProbe(cfg.camProbeURL, time.Duration(cfg.camStallS)*time.Second)
 	go watchCamera(cam, events, alerts, 10*time.Second)
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: newRouter(cfg, st, store, events, client, pend, cam),
+		Handler: newRouter(cfg, st, store, events, client, pend, cam, auto),
 		// 급수 요청은 장치 결과를 기다리므로 응답이 오래 걸립니다.
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      40 * time.Second,
@@ -222,7 +246,7 @@ func main() {
 	}
 }
 
-func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *pending, alerts *alertRules) mqtt.Client {
+func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *pending, alerts *alertRules, auto *autoWaterer) mqtt.Client {
 	base := "namo/pilot/" + cfg.deviceID
 	topicTelemetry := base + "/telemetry"
 	topicResult := base + "/water/result"
@@ -242,8 +266,11 @@ func connectMQTT(cfg config, st *state, store *Store, events *EventStore, pend *
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Print("MQTT 접속됨")
 		for topic, handler := range map[string]mqtt.MessageHandler{
-			topicTelemetry: func(_ mqtt.Client, m mqtt.Message) {
+			topicTelemetry: func(c mqtt.Client, m mqtt.Message) {
 				handleTelemetry(m.Payload(), st, store, events, w, alerts)
+				auto.observe(m.Payload(), time.Now(), func(dose int) (waterResult, error) {
+					return sendAuto(c, cfg.deviceID, pend, dose)
+				})
 			},
 			topicResult: func(_ mqtt.Client, m mqtt.Message) {
 				handleWaterResult(m.Payload(), store, events, pend)

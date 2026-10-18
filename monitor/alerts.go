@@ -31,6 +31,10 @@ type alertRules struct {
 	// 알림이 반복됩니다. 이만큼 더 올라와야 내립니다.
 	dryClearMargin int
 
+	// 자동급수가 켜져 있으면 마름 알림을 보내지 않습니다. 물을 줬다는
+	// 알림과 같은 일을 두 번 알리게 됩니다. nil이면 꺼진 것으로 봅니다.
+	autoOn func() bool
+
 	// 장치가 조용해도 이 시간까지는 기다립니다. WiFi가 잠깐 끊기거나
 	// 재부팅하는 동안 알림이 가면 성가십니다.
 	deviceGrace  time.Duration
@@ -114,7 +118,9 @@ func (r *alertRules) check(s alertState, now time.Time) {
 	//
 	// 임계값을 내려갈 때 올리고, 넉넉히 회복해야 내립니다. 경계에서
 	// 오르내릴 때 알림이 반복되지 않게 하기 위한 것입니다.
-	if s.Moisture != nil {
+	if r.autoOn != nil && r.autoOn() {
+		r.n.Clear(alertDry, "")
+	} else if s.Moisture != nil {
 		m := *s.Moisture
 		switch {
 		case m < r.dryPct:
