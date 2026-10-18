@@ -63,6 +63,17 @@
   .result.ok { color: var(--water); }
   .result.no { color: var(--warn); }
   .hint { font-size: .78rem; color: var(--dim); margin-top: .4rem; line-height: 1.5; }
+  .auto { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: .75rem; font-size: .85rem; }
+  .auto-note { display: block; font-size: .75rem; color: var(--dim); margin-top: .15rem; }
+  .auto-note.bad { color: var(--warn); }
+  .auto button {
+    flex: none; font: inherit; font-size: .78rem; padding: .3rem .8rem; cursor: pointer;
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--line); border-radius: .4rem;
+  }
+  .auto button[aria-pressed="true"] { background: var(--water); border-color: var(--water); color: #fff; }
+  .auto button.confirm { background: var(--warn); border-color: var(--warn); color: #fff; }
+  .auto button:disabled { opacity: .45; cursor: default; }
   .log { font-size: .8rem; }
   .log-row {
     display: grid; grid-template-columns: 4.2rem 1fr; gap: .6rem;
@@ -148,6 +159,10 @@
   <div class="row">
     <strong style="font-size:.9rem">급수</strong>
     <span class="live off" id="waterReady"><span class="dot"></span>확인 중</span>
+  </div>
+  <div class="auto">
+    <div>자동급수<span class="auto-note" id="autoNote"></span></div>
+    <button id="autoToggle" aria-pressed="false" disabled>확인 중</button>
   </div>
   <div class="doses" id="doses">
     <button data-ml="50">50 mL</button>
@@ -331,7 +346,7 @@ function renderWaterHint(s, ctx = {}) {
   }
   const lw = ctx.last_watering;
   if (lw) {
-    const via = lw.source === "web" ? " · 웹에서" : "";
+    const via = { web: " · 웹에서", auto: " · 자동" }[lw.source] || "";
     lines.push(`마지막 급수 <b>${lw.ml}mL</b> — ${fmtTime(lw.ts)} (${fmtAgo(lw.ts)})${via}`);
   }
   // 지난 실패는 최근 것만 보여줍니다. 한참 전에 거부된 기록이 지금도
@@ -368,7 +383,7 @@ function describe(e) {
   if (e.k === "water") {
     const tag = STATUS_LABEL[e.s] || e.s;
     if (e.s === "completed") {
-      return { cls: "ok", tag, text: `${e.ml}mL${e.pms ? ` · ${(e.pms / 1000).toFixed(1)}초` : ""}${e.src === "web" ? " · 웹" : ""}` };
+      return { cls: "ok", tag, text: `${e.ml}mL${e.pms ? ` · ${(e.pms / 1000).toFixed(1)}초` : ""}${{ web: " · 웹", auto: " · 자동" }[e.src] || ""}` };
     }
     const why = REASONS[e.r] || e.r || "";
     const extra = e.ml ? ` (${e.ml}mL 나감)` : "";
@@ -692,6 +707,106 @@ document.getElementById("doses").addEventListener("click", async (e) => {
 // 다른 곳을 누르면 확인 상태를 풉니다.
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#doses")) disarm();
+});
+
+// ── 자동급수 ───────────────────────────────────────────────────────
+//
+// 흙이 마르면 서버가 스스로 물을 줍니다. 켜고 끄는 것과 지금 왜 못 주는지는
+// /api/auto 가 알려줍니다. 켜는 순간 흙이 말라 있으면 곧바로 물이 나가므로
+// 켤 때만 한 번 더 묻습니다.
+const autoBtn = document.getElementById("autoToggle");
+const autoNote = document.getElementById("autoNote");
+let autoState = null;
+let autoArmed = null; // 확인을 기다리는 요청. 기다리는 사이 상태가 바뀌어도 누른 뜻대로 보냅니다.
+let autoBusy = false;
+
+function renderAuto(a) {
+  autoState = a;
+  if (autoArmed || autoBusy) return;
+  autoBtn.disabled = false;
+  autoBtn.classList.remove("confirm");
+  autoBtn.setAttribute("aria-pressed", String(a.enabled && !a.stopped));
+
+  let note = "", bad = false;
+  if (!a.enabled) {
+    autoBtn.textContent = "꺼짐";
+    note = "켜면 흙이 마를 때 스스로 줍니다";
+  } else if (a.stopped) {
+    autoBtn.textContent = "다시 켜기";
+    note = "멈췄습니다 (흙수분이 오르지 않았거나 장치 오류). 펌프와 센서를 확인하세요";
+    bad = true;
+  } else {
+    autoBtn.textContent = "켜짐";
+    note = `흙 ${a.dry_pct}% 미만이면 ${a.dose_ml}mL`;
+    if (a.hold) {
+      note += ` · 보류: ${REASONS[a.hold] || a.hold}`;
+      bad = true;
+    }
+  }
+  autoNote.textContent = note;
+  autoNote.className = bad ? "auto-note bad" : "auto-note";
+}
+
+async function loadAuto() {
+  const res = await fetch(api("/api/auto"));
+  if (res.ok) renderAuto(await res.json());
+}
+
+function disarmAuto() {
+  if (!autoArmed) return;
+  autoArmed = null;
+  if (autoState) renderAuto(autoState);
+}
+
+autoBtn.addEventListener("click", async () => {
+  if (!autoState || autoBusy) return;
+
+  // 켜기와 다시 켜기는 곧바로 물이 나갈 수 있어 한 번 더 묻습니다. 끄기는
+  // 바로 합니다. 멈춘 것을 다시 맡길 때는 resume을 보냅니다. 같은 값의
+  // enabled는 서버가 무시합니다.
+  let body = autoArmed;
+  if (!body) {
+    if (autoState.enabled && !autoState.stopped) {
+      body = { enabled: false };
+    } else {
+      autoArmed = autoState.enabled ? { resume: true } : { enabled: true };
+      autoBtn.classList.add("confirm");
+      autoBtn.textContent = "정말?";
+      autoNote.className = "auto-note";
+      autoNote.textContent = "흙이 말라 있으면 바로 물이 나갑니다";
+      return;
+    }
+  }
+
+  autoArmed = null;
+  autoBusy = true;
+  autoBtn.disabled = true;
+  try {
+    const res = await fetch(api("/api/auto"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    autoBusy = false;
+    if (res.ok) {
+      renderAuto(data);
+    } else {
+      renderAuto(autoState);
+      autoNote.className = "auto-note bad";
+      autoNote.textContent = data.error || `실패 (HTTP ${res.status})`;
+    }
+  } catch (e) {
+    autoBusy = false;
+    renderAuto(autoState);
+    autoNote.className = "auto-note bad";
+    autoNote.textContent = "요청을 보내지 못했습니다";
+  }
+});
+
+// 다른 곳을 누르면 확인 상태를 풉니다.
+document.addEventListener("click", (e) => {
+  if (e.target !== autoBtn) disarmAuto();
 });
 
 // ── 카메라 ─────────────────────────────────────────────────────────
@@ -1032,7 +1147,7 @@ loadConfig().then(tick);
 
 async function tick() {
   try {
-    await Promise.all([loadState(), loadChart(), loadLog()]);
+    await Promise.all([loadState(), loadChart(), loadLog(), loadAuto()]);
   } catch (e) {
     // 한 번 실패해도 다음 주기에 다시 시도합니다.
   }
