@@ -152,6 +152,7 @@ pub fn run_event_loop(
         match event.payload() {
             EventPayload::Connected(_) => {
                 log::info!("MQTT 접속됨");
+                set_connected(&shared, true);
                 // 구독은 여기서 하지 않습니다. subscribe는 SUBACK을 기다리고
                 // 그 응답은 이 루프가 받아야 하므로, 여기서 부르면 자기가
                 // 기다리는 것을 자기가 처리하지 못해 멈춥니다. 클라이언트
@@ -160,7 +161,10 @@ pub fn run_event_loop(
                     log::error!("구독 담당 태스크가 없습니다");
                 }
             }
-            EventPayload::Disconnected => log::warn!("MQTT 연결 끊김"),
+            EventPayload::Disconnected => {
+                log::warn!("MQTT 연결 끊김");
+                set_connected(&shared, false);
+            }
             EventPayload::Received {
                 topic: Some(topic),
                 data,
@@ -170,6 +174,14 @@ pub fn run_event_loop(
         }
     }
     log::warn!("MQTT 이벤트 루프가 끝났습니다");
+    set_connected(&shared, false);
+}
+
+/// 워치독이 볼 접속 여부를 갱신합니다.
+fn set_connected(shared: &Shared, connected: bool) {
+    if let Ok(mut state) = shared.lock() {
+        state.mqtt_connected = connected;
+    }
 }
 
 /// 접속될 때마다 구독을 다시 겁니다. 돌아오지 않습니다.

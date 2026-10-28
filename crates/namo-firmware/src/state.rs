@@ -35,6 +35,8 @@ pub struct SharedState {
     /// 누수 센서를 날라주는 게이트웨이(Zigbee2MQTT)의 생존 여부.
     /// `None`이면 아직 소식을 못 들은 상태입니다.
     pub gateway_online: Option<bool>,
+    /// 브로커와 MQTT 세션이 살아 있는지. 워치독이 봅니다(§4.7).
+    pub mqtt_connected: bool,
     /// 누수로 잠긴 상태(S5). `unlock` 명령으로만 풀립니다.
     pub locked: bool,
     pub pump: PumpState,
@@ -59,6 +61,7 @@ impl SharedState {
             leak_tank: LeakSensor::default(),
             leak_pot: LeakSensor::default(),
             gateway_online: None,
+            mqtt_connected: false,
             locked: false,
             pump: PumpState::Idle,
             last_completed_at: None,

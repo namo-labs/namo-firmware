@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let _wifi = net::wifi::connect(
+    let esp_wifi = net::wifi::connect(
         peripherals.modem,
         sys_loop,
         nvs,
@@ -131,11 +131,10 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("모든 태스크가 기동됐습니다");
 
-    // main 스레드가 끝나면 _wifi와 sntp가 떨어져 네트워크가 내려갑니다.
-    // 여기서 붙잡아 둡니다.
-    loop {
-        std::thread::sleep(Duration::from_secs(60));
-    }
+    // main 스레드가 끝나면 WiFi와 sntp가 떨어져 네트워크가 내려갑니다.
+    // 돌아오지 않는 감독 루프가 WiFi를 쥐고 있고, sntp는 이 함수의 지역
+    // 변수로 남습니다. 접속이 끊기면 여기서 다시 붙입니다(§4.7).
+    net::supervisor::run(esp_wifi, shared)
 }
 
 /// 플로트 스위치를 주기적으로 읽어 공유 상태에 반영합니다.
